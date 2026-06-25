@@ -19,10 +19,13 @@ checkpoints/
 # ===== Dataset =====
 dataset_acne04_folds/
 Classification/
-eda_outputs/
+
+
 # ===== Output folders =====
-
-
+eda_outputs/
+eval_outputs/
+gradcam_outputs/
+reports/
 # ===== Jupyter =====
 .ipynb_checkpoints/
 

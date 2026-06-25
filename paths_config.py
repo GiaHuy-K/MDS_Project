@@ -11,9 +11,8 @@ Cau truc thu muc project (mac dinh):
 project_root/                      <- noi chua file paths_config.py nay
 ├── Classification/
 │   ├── JPEGImages/                <- anh goc ACNE04
-│   └── NNEW_trainval_*.txt, NNEW_test_*.txt   <- file fold goc (neu dung k-fold)
-├── dataset_final_70_15_15/        <- output 01_split_dataset.py (single split)
-├── dataset_acne04_folds/          <- output ban k-fold (neu dung)
+│   └── NNEW_trainval_*.txt, NNEW_test_*.txt   <- file fold goc cua ACNE04
+├── dataset_acne04_folds/          <- output chia k-fold theo fold goc ACNE04
 ├── checkpoints/
 ├── eda_outputs/
 ├── eval_outputs/
@@ -45,31 +44,31 @@ if _env_root:
 # ==========================================
 # 2. TUY CHINH (sua o day neu cau truc thu muc cua ban khac mac dinh)
 # ==========================================
-CLASSIFICATION_DIRNAME = "Classification"
-IMAGE_SUBDIR = "JPEGImages"
+CLASSIFICATION_DIRNAME  = "Classification"
+IMAGE_SUBDIR            = "JPEGImages"
 
-SPLIT_DATASET_DIRNAME = "dataset_final_70_15_15"   # output chia 1 lan 70/15/15
-KFOLD_DATASET_DIRNAME = "dataset_acne04_folds"      # output chia k-fold
+KFOLD_DATASET_DIRNAME   = "dataset_acne04_folds"   # output chia k-fold theo fold goc ACNE04
 
-CHECKPOINT_DIRNAME = "checkpoints"
-EDA_OUTPUT_DIRNAME = "eda_outputs"
-EVAL_OUTPUT_DIRNAME = "eval_outputs"
-GRADCAM_OUTPUT_DIRNAME = "gradcam_outputs"
+CHECKPOINT_DIRNAME      = "checkpoints"
+EDA_OUTPUT_DIRNAME      = "eda_outputs"
+EVAL_OUTPUT_DIRNAME     = "eval_outputs"
+GRADCAM_OUTPUT_DIRNAME  = "gradcam_outputs"
+REPORT_DIRNAME          = "reports"
 
 # ==========================================
 # 3. CAC DUONG DAN SUY RA - DUNG TRUC TIEP TRONG CAC SCRIPT KHAC
 # ==========================================
-CLASSIFICATION_DIR = PROJECT_ROOT / CLASSIFICATION_DIRNAME
-IMAGE_SOURCE_DIR = CLASSIFICATION_DIR / IMAGE_SUBDIR
-TXT_DIR = CLASSIFICATION_DIR  # noi chua NNEW_trainval_X.txt / NNEW_test_X.txt (neu co)
+CLASSIFICATION_DIR  = PROJECT_ROOT / CLASSIFICATION_DIRNAME
+IMAGE_SOURCE_DIR    = CLASSIFICATION_DIR / IMAGE_SUBDIR
+TXT_DIR             = CLASSIFICATION_DIR   # noi chua NNEW_trainval_X.txt / NNEW_test_X.txt
 
-SPLIT_DATASET_DIR = PROJECT_ROOT / SPLIT_DATASET_DIRNAME
-KFOLD_DATASET_DIR = PROJECT_ROOT / KFOLD_DATASET_DIRNAME
+KFOLD_DATASET_DIR   = PROJECT_ROOT / KFOLD_DATASET_DIRNAME
 
-CHECKPOINT_DIR = PROJECT_ROOT / CHECKPOINT_DIRNAME
-EDA_OUTPUT_DIR = PROJECT_ROOT / EDA_OUTPUT_DIRNAME
-EVAL_OUTPUT_DIR = PROJECT_ROOT / EVAL_OUTPUT_DIRNAME
-GRADCAM_OUTPUT_DIR = PROJECT_ROOT / GRADCAM_OUTPUT_DIRNAME
+CHECKPOINT_DIR      = PROJECT_ROOT / CHECKPOINT_DIRNAME
+EDA_OUTPUT_DIR      = PROJECT_ROOT / EDA_OUTPUT_DIRNAME
+EVAL_OUTPUT_DIR     = PROJECT_ROOT / EVAL_OUTPUT_DIRNAME
+GRADCAM_OUTPUT_DIR  = PROJECT_ROOT / GRADCAM_OUTPUT_DIRNAME
+REPORT_DIR          = PROJECT_ROOT / REPORT_DIRNAME
 
 
 def ensure_dirs(*dirs):
@@ -86,13 +85,13 @@ if __name__ == "__main__":
     # Chay: python paths_config.py  -> in ra de tu kiem tra duong dan da dung chua
     print(f"PROJECT_ROOT      = {PROJECT_ROOT}")
     print(f"IMAGE_SOURCE_DIR  = {IMAGE_SOURCE_DIR}   [{_check(IMAGE_SOURCE_DIR)}]")
-    print(f"TXT_DIR           = {TXT_DIR}   [{_check(TXT_DIR)}]")
-    print(f"SPLIT_DATASET_DIR = {SPLIT_DATASET_DIR}   [{_check(SPLIT_DATASET_DIR)}]")
+    print(f"TXT_DIR           = {TXT_DIR}             [{_check(TXT_DIR)}]")
     print(f"KFOLD_DATASET_DIR = {KFOLD_DATASET_DIR}   [{_check(KFOLD_DATASET_DIR)}]")
-    print(f"CHECKPOINT_DIR    = {CHECKPOINT_DIR}")
-    print(f"EDA_OUTPUT_DIR    = {EDA_OUTPUT_DIR}")
-    print(f"EVAL_OUTPUT_DIR   = {EVAL_OUTPUT_DIR}")
-    print(f"GRADCAM_OUTPUT_DIR= {GRADCAM_OUTPUT_DIR}")
+    print(f"CHECKPOINT_DIR    = {CHECKPOINT_DIR}       [{_check(CHECKPOINT_DIR)}]")
+    print(f"EDA_OUTPUT_DIR    = {EDA_OUTPUT_DIR}       [{_check(EDA_OUTPUT_DIR)}]")
+    print(f"EVAL_OUTPUT_DIR   = {EVAL_OUTPUT_DIR}      [{_check(EVAL_OUTPUT_DIR)}]")
+    print(f"GRADCAM_OUTPUT_DIR= {GRADCAM_OUTPUT_DIR}   [{_check(GRADCAM_OUTPUT_DIR)}]")
+    print(f"REPORT_DIR        = {REPORT_DIR}           [{_check(REPORT_DIR)}]")
     print()
     print("Neu duong dan nao bao 'KHONG TIM THAY' va sai mac dinh,")
     print("sua phan '2. TUY CHINH' o tren, hoac set bien moi truong ACNE_PROJECT_ROOT.")
