@@ -19,7 +19,7 @@ checkpoints/
 # ===== Dataset =====
 dataset_acne04_folds/
 Classification/
-
+kfold_dataset_resized/
 
 # ===== Output folders =====
 eda_outputs/
