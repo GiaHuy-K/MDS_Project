@@ -52,10 +52,10 @@ from paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, PROJECT_ROOT, ensure
 # ==========================================
 # 1. CAU HINH
 # ==========================================
-BATCH_SIZE      = 32
-EPOCHS          = 40
+BATCH_SIZE      = 16
+EPOCHS          = 100
 LR              = 1e-4    # Train toan bo model voi 1 LR thong nhat
-PATIENCE        = 7
+PATIENCE        = 10
 WEIGHT_DECAY    = 5e-4
 LABEL_SMOOTHING = 0.1
 RANDOM_SEED     = 42
@@ -143,7 +143,9 @@ def build_loaders(model_name, fold_dir):
 
     # Windows: num_workers > 0 can dung if __name__ == "__main__" guard
     # RTX 3050 Ti: num_workers=4 giam CPU bottleneck dang ke
-    kw = dict(num_workers=4, pin_memory=True, persistent_workers=True)
+    N_WORKERS = 0 if os.name == "nt" else 4   # nt = Windows
+    kw = dict(num_workers=N_WORKERS, pin_memory=True,
+          persistent_workers=(N_WORKERS > 0))
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, **kw)
     val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,   **kw)
     test_loader  = DataLoader(test_dataset,  batch_size=BATCH_SIZE, shuffle=False,   **kw)
