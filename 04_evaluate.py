@@ -1,12 +1,6 @@
 """
-Buoc 4: Danh gia chi tiet CA 3 MODEL tren TEST SET cua fold_1.
-
-Ket qua xuat ra trong eval_outputs/:
-  - cm_<model>.png              Confusion matrix dang heatmap
-  - roc_<model>.png             ROC curves One-vs-Rest cho 4 class + AUC
-  - misclassified_<model>.csv   Danh sach anh bi du doan sai
-  - summary_eval.csv            Bang tong hop Acc + F1 + AUC ca 3 model
-  - In ra Precision/Recall/F1 (tung class + macro/weighted), AUC-ROC
+Buoc 4: Danh gia chi tiet 3 model tren test set cua fold_1.
+Output: eval_outputs/cm_*.png, roc_*.png, misclassified_*.csv, summary_eval.csv
 """
 
 import os
@@ -57,7 +51,11 @@ def build_test_loader(model_name):
     cfg = MODEL_CONFIGS[model_name]
     img_size = cfg["img_size"]
     eval_transforms = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
+        transforms.Resize(
+            (img_size, img_size),
+            interpolation=transforms.InterpolationMode.BILINEAR,
+            antialias=True,
+        ),
         transforms.ToTensor(),
         transforms.Normalize(cfg["mean"], cfg["std"]),
     ])
@@ -225,7 +223,7 @@ def save_misclassified(test_dataset, y_true, y_pred, model_name):
 # ==========================================
 def evaluate_model(model_name):
     display_name     = MODEL_CONFIGS[model_name]["display_name"]
-    checkpoint_path  = os.path.join(CHECKPOINT_DIR, f"best_{model_name}.pth")
+    checkpoint_path  = os.path.join(CHECKPOINT_DIR, f"best_{model_name}_{FOLD_NAME}.pth")
 
     print(f"\n{'='*60}")
     print(f" DANH GIA: {display_name} ({model_name})")

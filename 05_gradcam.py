@@ -1,17 +1,6 @@
 """
 Buoc 5: Grad-CAM++ Explainability (XAI).
-
-Tao heatmap cho thay model "nhin" vao vung nao cua anh khi du doan,
-phuc vu phan "Discussion ve kha nang ung dung cho Asian skin tones".
-
-Su dung Grad-CAM++ (thay vi GradCAM goc) vi:
-  - Xu ly tot hon khi co nhieu ton thuong (multiple acne) trong 1 anh
-  - On dinh hon voi depthwise separable conv (EfficientNet-Lite3, MobileNetV3, ShuffleNetV2)
-  - Cho heatmap chinh xac hon o vung minority class (Level_2, Level_3)
-
-Chay cho 1 hoac nhieu anh, voi 1 hoac ca 3 model nhe de so sanh.
-Ngoai cac anh heatmap rieng le, script con tao 1 anh ghep (grid) so sanh
-goc / Lite3 / MobileNetV3-Small / ShuffleNetV2 canh nhau cho moi anh mau.
+Output: gradcam_outputs/ — heatmap tung model va anh grid so sanh 3 model.
 """
 
 import os
@@ -21,9 +10,9 @@ import numpy as np
 import cv2
 from torchvision import transforms
 from PIL import Image
-from pytorch_grad_cam import GradCAMPlusPlus          # [FIX] dung GradCAM++ thay GradCAM
+from pytorch_grad_cam import GradCAMPlusPlus
 from pytorch_grad_cam.utils.image import show_cam_on_image
-from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget   # [ADD] explicit target
+from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 
 from model_utils import MODEL_CONFIGS, CLASS_NAMES, get_model, get_target_layers
 from paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, GRADCAM_OUTPUT_DIR, ensure_dirs
@@ -32,6 +21,7 @@ from paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, GRADCAM_OUTPUT_DIR, 
 # CAU HINH
 # ==========================================
 OUTPUT_DIR = GRADCAM_OUTPUT_DIR
+FOLD_NAME  = "fold_1"    # Dong bo voi 04_evaluate.py
 
 # Danh sach anh muon xem Grad-CAM++ - de trong [] de TU DONG lay 1 anh dai dien
 # moi Level tu thu muc test.
@@ -54,7 +44,7 @@ print(f"Chay tren thiet bi: {DEVICE}")
 # ==========================================
 def _auto_pick_samples(n_per_level=N_PER_LEVEL):
     """Neu SAMPLE_IMAGES de trong, tu dong lay anh dai dien tu fold_1/test/Level_X."""
-    test_dir = os.path.join(KFOLD_DATASET_DIR, "fold_1", "test")   # [FIX] dung KFOLD_DATASET_DIR
+    test_dir = os.path.join(KFOLD_DATASET_DIR, "fold_1", "test")
     picked = []
     if not os.path.isdir(test_dir):
         print(f"  Khong tim thay {test_dir} de tu dong chon anh mau.")
@@ -80,7 +70,11 @@ def _auto_pick_samples(n_per_level=N_PER_LEVEL):
 def build_eval_transform(model_name):
     cfg = MODEL_CONFIGS[model_name]
     transform = transforms.Compose([
-        transforms.Resize((cfg["img_size"], cfg["img_size"])),
+        transforms.Resize(
+            (cfg["img_size"], cfg["img_size"]),
+            interpolation=transforms.InterpolationMode.BILINEAR,
+            antialias=True,
+        ),
         transforms.ToTensor(),
         transforms.Normalize(cfg["mean"], cfg["std"]),
     ])
@@ -91,12 +85,7 @@ def build_eval_transform(model_name):
 # GRAD-CAM++ CHO 1 MODEL / 1 ANH
 # ==========================================
 def apply_gradcam_plusplus(model_name, img_path, output_dir):
-    """
-    [FIX] Dung GradCAMPlusPlus thay GradCAM.
-    [ADD] Dung ClassifierOutputTarget de chi dinh ro class can visualize
-          (predicted class) thay vi de mac dinh - tranh nham khi top-1 va target khac nhau.
-    """
-    checkpoint_path = os.path.join(CHECKPOINT_DIR, f"best_{model_name}.pth")
+    checkpoint_path = os.path.join(CHECKPOINT_DIR, f"best_{model_name}_{FOLD_NAME}.pth")
     if not os.path.exists(checkpoint_path):
         print(f"  Bo qua {model_name}: khong tim thay checkpoint {checkpoint_path}")
         return None
@@ -139,20 +128,14 @@ def apply_gradcam_plusplus(model_name, img_path, output_dir):
     print(f"    {model_name}: [{prob_str}]")
     print(f"    -> Du doan: {CLASS_NAMES[pred_idx]} ({confidence*100:.1f}%)")
 
-    # [FIX] GradCAM++ voi ClassifierOutputTarget
-    # ClassifierOutputTarget(pred_idx): tinh gradient theo dung class duoc du doan
-    # -> tranh truong hop GradCAM tinh gradient theo class co score cao nhat trong
-    #    output nhung khong phai class muon visualize
     target_layers = get_target_layers(model, model_name)
     targets       = [ClassifierOutputTarget(pred_idx)]
 
     with GradCAMPlusPlus(model=model, target_layers=target_layers) as cam:
         grayscale_cam = cam(input_tensor=tensor, targets=targets)[0]
 
-    # Overlay heatmap len anh goc
     visualization = show_cam_on_image(img_np, grayscale_cam, use_rgb=True)
 
-    # Luu anh heatmap rieng le
     img_basename = os.path.splitext(os.path.basename(img_path))[0]
     save_name    = f"{img_basename}_{model_name}_pred-{CLASS_NAMES[pred_idx]}.jpg"
     save_path    = os.path.join(output_dir, save_name)

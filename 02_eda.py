@@ -1,27 +1,23 @@
 """
-Buoc 2: EDA (Exploratory Data Analysis) cho dataset da chia.
-
-Kiem tra:
-  - So luong anh moi class trong tung tap train/val/test
-  - Phat hien anh loi / khong doc duoc
-  - Kich thuoc anh trung binh
-  - Ve bieu do phan bo lop va vai anh mau moi level
+Buoc 2: EDA — kiem tra phan bo du lieu, phat hien anh loi, ve bieu do.
+Output: eda_outputs/class_distribution.png, sample_images.png
 """
 
 import os
-from collections import defaultdict
 
 import matplotlib.pyplot as plt
 from PIL import Image
 
-DATA_DIR    = r"C:\Users\ADMIN\Desktop\Code\Fisat_2026\dataset_final_70_15_15"
+from paths_config import KFOLD_DATASET_DIR, EDA_OUTPUT_DIR, ensure_dirs
+from model_utils import CLASS_NAMES
+
+FOLD_NAME   = "fold_1"
+DATA_DIR    = str(KFOLD_DATASET_DIR / FOLD_NAME)
 SPLITS      = ["train", "val", "test"]
-CLASS_NAMES = ["Level_0", "Level_1", "Level_2", "Level_3"]
-OUTPUT_DIR  = "eda_outputs"
+OUTPUT_DIR  = str(EDA_OUTPUT_DIR)
 
 
 def count_images_per_class(data_dir):
-    """Tra ve dict: {split: {class_name: count}}"""
     counts = {}
     for split in SPLITS:
         split_dir = os.path.join(data_dir, split)
@@ -36,7 +32,6 @@ def count_images_per_class(data_dir):
 
 
 def check_broken_images(data_dir):
-    """Quet tat ca anh, phat hien file loi khong mo duoc."""
     broken = []
     sizes = []
 
@@ -59,7 +54,6 @@ def check_broken_images(data_dir):
 
 
 def plot_class_distribution(counts, output_dir):
-    """Ve bar chart so luong anh moi class, chia theo split."""
     fig, ax = plt.subplots(figsize=(8, 5))
 
     x = range(len(CLASS_NAMES))
@@ -84,7 +78,6 @@ def plot_class_distribution(counts, output_dir):
 
 
 def plot_sample_images(data_dir, output_dir, n_samples=4):
-    """Ve vai anh mau moi class tu tap train."""
     fig, axes = plt.subplots(len(CLASS_NAMES), n_samples, figsize=(n_samples * 2.5, len(CLASS_NAMES) * 2.5))
 
     for row, cls in enumerate(CLASS_NAMES):

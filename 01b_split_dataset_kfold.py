@@ -1,26 +1,8 @@
 """
-Buoc 1 (PHIEN BAN K-FOLD - TUY CHON): Chia dataset Acne04 theo dung k-fold
-goc cua bo du lieu (file NNEW_trainval_<fold>.txt / NNEW_test_<fold>.txt),
-thay vi tu chia ngau nhien 70/15/15 nhu 01_split_dataset.py.
+Buoc 1: Chia dataset ACNE04 thanh 5 fold dua tren file .txt goc
+(NNEW_trainval_<fold>.txt / NNEW_test_<fold>.txt).
 
-CHI DUNG FILE NAY NEU BAN CO SAN cac file .txt fold goc cua ACNE04
-(thuong dat trong thu muc Classification/, vd: NNEW_trainval_1.txt, NNEW_test_1.txt...).
-Neu khong co thi dung 01_split_dataset.py la du.
-
-==========================================================================
-GIA DINH VE DINH DANG FILE .txt (theo dung repo goc cua ACNE04/LDL paper):
-    moi dong: "<ten_anh> <do_nang_0_den_3> <so_luong_ton_thuong>"
-    vi du:    levle0_12.jpg 0 5
-    -> Cot 2 (ngay sau ten anh) la NHAN DO NANG (0-3), dung de phan loai.
-    -> Cot 3 (neu co) la so luong ton thuong (lesion count, co the rat lon,
-       vi du 39, 42...) - KHONG dung lam nhan, chi de tham khao/dem.
-==========================================================================
-NEU file .txt cua ban co dinh dang KHAC (vi du chi co 2 cot, hoac thu tu
-cot khac), sua ham `parse_line()` ben duoi cho khop - phan con lai cua
-script khong can doi.
-
-Duong dan (IMAGE_SOURCE_DIR, TXT_DIR, OUTPUT_BASE_DIR) lay tu paths_config.py,
-tu dong nhan dien theo vi tri project - khong can sua tay khi doi may.
+Output: dataset_acne04_folds/fold_1..5/train|val|test/Level_0..3/
 """
 
 import os
@@ -32,27 +14,15 @@ from sklearn.model_selection import train_test_split
 
 from paths_config import IMAGE_SOURCE_DIR, TXT_DIR, KFOLD_DATASET_DIR
 
-# ==========================================
-# CAU HINH
-# ==========================================
-# Mau ten file fold goc cua ACNE04. Sua lai neu ten file cua ban khac.
-TRAINVAL_PATTERN = "NNEW_trainval_*.txt"
-TEST_PATTERN = "NNEW_test_*.txt"
-
-VAL_RATIO_OF_TRAINVAL = 0.15   # tach them val tu phan trainval cua moi fold
-RANDOM_SEED = 42
-VALID_LEVELS = {0, 1, 2, 3}    # nhan hop le cho bai toan 4-class
+TRAINVAL_PATTERN      = "NNEW_trainval_*.txt"
+TEST_PATTERN          = "NNEW_test_*.txt"
+VAL_RATIO_OF_TRAINVAL = 0.15
+RANDOM_SEED           = 42
+VALID_LEVELS          = {0, 1, 2, 3}
 
 
 def parse_line(line):
-    """Tra ve (ten_anh, level_int) tu 1 dong trong file .txt, hoac None neu khong parse duoc.
-
-    Dinh dang ACNE04 goc: "<ten_anh> <do_nang> <so_luong_ton_thuong (tuy chon)>"
-    -> Nhan luon nam o COT THU 2 (parts[1]), KHONG phai cot cuoi cung
-       (cot cuoi co the la lesion count, vd 39, 42... khong phai nhan 0-3).
-
-    SUA HAM NAY neu dinh dang file .txt cua ban khac.
-    """
+    """Parse 1 dong file .txt -> (img_name, level) hoac None."""
     line = line.strip()
     if not line:
         return None
@@ -62,7 +32,7 @@ def parse_line(line):
         return None
 
     img_name = os.path.basename(parts[0])
-    label_raw = parts[1]  # cot thu 2 = do nang, KHONG dung parts[-1]
+    label_raw = parts[1]  # cot 2 = do nang (0-3), khong dung parts[-1] (lesion count)
 
     match = re.search(r"\d+", label_raw)
     if not match:
@@ -70,8 +40,6 @@ def parse_line(line):
     level = int(match.group())
 
     if level not in VALID_LEVELS:
-        # Bao ve: neu gap nhan ngoai 0-3 (vd do doc nham cot lesion count),
-        # bo qua dong nay thay vi de loi lan toi tan train_test_split.
         return None
 
     return img_name, level
@@ -79,7 +47,7 @@ def parse_line(line):
 
 
 def load_fold_file(txt_path):
-    """Doc 1 file .txt, tra ve list[(img_name, level)]. In canh bao neu co dong bi bo qua."""
+    """Doc file .txt, tra ve list[(img_name, level)]."""
     items = []
     skipped = 0
     with open(txt_path, "r", encoding="utf-8") as f:
@@ -159,7 +127,6 @@ def main():
         trainval_items = load_fold_file(trainval_path)
         test_items = load_fold_file(test_path)
 
-        # Tach val tu trainval, stratified theo level
         labels = [lv for _, lv in trainval_items]
         train_items, val_items = train_test_split(
             trainval_items,
@@ -174,8 +141,7 @@ def main():
 
         print(f"  Train: {n_train} | Val: {n_val} | Test: {n_test}")
 
-    print(f"\nHoan tat! Xem ket qua trong: {KFOLD_DATASET_DIR}")
-    print("Cau truc: dataset_acne04_folds/fold_<i>/train|val|test/Level_0..3/")
+    print(f"\nHoan tat! Output: {KFOLD_DATASET_DIR}")
 
 
 if __name__ == "__main__":

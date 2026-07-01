@@ -1,31 +1,14 @@
 """
-Buoc 3: Training pipeline cho 3 model NHE (Lightweight) - 5-FOLD CROSS VALIDATION
-  - EfficientNet-Lite3   (model chinh cua de tai)
-  - MobileNetV3-Small
-  - ShuffleNetV2-x1.0
+Buoc 3: Training pipeline — 5-Fold Cross Validation voi 3 model nhe.
 
-Quy trinh:
-- Lap qua tat ca fold_1 -> fold_5
-- Moi fold: train toan bo model (KHONG freeze) -> chon best model theo VAL MACRO F1
-- Sau khi het 5 fold: tinh mean +/- std cua Accuracy va Macro F1
-- Xuat CSV tong hop tat ca fold + bang trung binh cuoi cung
-
-=== CAC THAY DOI SO VOI BAN GOC ===
-[BUG FIX] torch.enable_grad() / torch.no_grad(): tach 2 nhanh if/else rieng biet
-[BUG FIX] torch.load them weights_only=True (tranh warning PyTorch >= 2.0)
-[FIX]     Best model chon theo MACRO F1, khong phai accuracy (phu hop class imbalance)
-[FIX]     Augmentation nhe hon: bo RandomErasing + RandomAffine, giam rotation 15->10
-[FIX]     Scheduler doi sang ReduceLROnPlateau(mode=max, metric=val_f1)
-[FIX]     Bo freeze/unfreeze: train toan bo model ngay tu dau voi LR thong nhat
-[ADD]     WeightedRandomSampler: oversample minority class
-[ADD]     run_epoch tra ve macro_f1
-[ADD]     K-fold discovery tu dong (khong can hardcode so fold)
-[ADD]     CSV ket qua chi tiet tung fold + bang trung binh
-[ADD]     cudnn.deterministic = True
+Model: EfficientNet-Lite3 (chinh), MobileNetV3-Small, ShuffleNetV2-x1.0
+Chon best checkpoint theo Val Macro F1 (phu hop class imbalance).
+Output: checkpoints/best_<model>_<fold>.pth, kfold_results_detail.csv, kfold_results_summary.csv
 """
 
 import os
 import csv
+import json
 import statistics
 from collections import Counter
 from datetime import datetime
@@ -37,6 +20,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import datasets, transforms
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from model_utils import (
     ALL_MODELS,
@@ -47,15 +31,15 @@ from model_utils import (
     count_params,
     measure_inference_time,
 )
-from paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, PROJECT_ROOT, ensure_dirs
+from paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, EVAL_OUTPUT_DIR, PROJECT_ROOT, ensure_dirs
 
 # ==========================================
 # 1. CAU HINH
 # ==========================================
-BATCH_SIZE      = 32
-EPOCHS          = 40
+BATCH_SIZE      = 16
+EPOCHS          = 100
 LR              = 1e-4    # Train toan bo model voi 1 LR thong nhat
-PATIENCE        = 7
+PATIENCE        = 10
 WEIGHT_DECAY    = 5e-4
 LABEL_SMOOTHING = 0.1
 RANDOM_SEED     = 42
@@ -69,13 +53,16 @@ torch.cuda.manual_seed(RANDOM_SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark     = False
 
+# ==========================================
+# 2. THIET BI
+# ==========================================
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Chay tren thiet bi : {DEVICE}")
 print(f"Bat dau            : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 # ==========================================
-# 2. TIM FOLD TU DONG
+# 3. TIM FOLD TU DONG
 # ==========================================
 def discover_folds():
     if not os.path.isdir(KFOLD_DATASET_DIR):
@@ -111,7 +98,7 @@ def build_loaders(model_name, fold_dir):
     train_transforms = transforms.Compose([
         transforms.Resize((img_size, img_size),
                           interpolation=transforms.InterpolationMode.BILINEAR,
-                          antialias=True),   # Bo Resize+Crop: nhanh hon, it CPU hon
+                          antialias=True),
         transforms.RandomHorizontalFlip(),
         transforms.RandomRotation(10),
         transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1),
@@ -141,9 +128,8 @@ def build_loaders(model_name, fold_dir):
         weights=sample_weights, num_samples=len(sample_weights), replacement=True
     )
 
-    # Windows: num_workers > 0 can dung if __name__ == "__main__" guard
-    # RTX 3050 Ti: num_workers=4 giam CPU bottleneck dang ke
-    kw = dict(num_workers=4, pin_memory=True, persistent_workers=True)
+    # num_workers=4: Windows yeu cau if __name__=="__main__" guard (da co o cuoi file)
+    kw = dict(num_workers=4, pin_memory=True)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, **kw)
     val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,   **kw)
     test_loader  = DataLoader(test_dataset,  batch_size=BATCH_SIZE, shuffle=False,   **kw)
@@ -162,6 +148,36 @@ def build_class_weights(train_dataset):
     print(f"  Class counts : {dict(sorted(counts.items()))}")
     print(f"  Class weights: {[round(w, 3) for w in weights.tolist()]}")
     return weights
+
+def plot_learning_curve(history, model_name, fold_name):
+    ensure_dirs(EVAL_OUTPUT_DIR)
+    epochs = range(1, len(history['train_loss']) + 1)
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Loss plot
+    ax1.plot(epochs, history['train_loss'], 'b-', label='Train Loss')
+    ax1.plot(epochs, history['val_loss'], 'r-', label='Val Loss')
+    ax1.set_title(f'Learning Curve (Loss) - {model_name} {fold_name}')
+    ax1.set_xlabel('Epochs')
+    ax1.set_ylabel('Loss')
+    ax1.legend()
+    ax1.grid(True)
+    
+    # F1 plot
+    ax2.plot(epochs, history['train_f1'], 'b-', label='Train Macro F1')
+    ax2.plot(epochs, history['val_f1'], 'r-', label='Val Macro F1')
+    ax2.set_title(f'Learning Curve (F1) - {model_name} {fold_name}')
+    ax2.set_xlabel('Epochs')
+    ax2.set_ylabel('Macro F1')
+    ax2.legend()
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    save_path = os.path.join(EVAL_OUTPUT_DIR, f"learning_curve_{model_name}_{fold_name}.png")
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"    -> Saved learning curve: {save_path}")
 
 
 # ==========================================
@@ -235,6 +251,8 @@ def train_one_fold(model_name, fold_name, fold_dir):
     patience_count = 0
     save_path = os.path.join(CHECKPOINT_DIR, f"best_{model_name}_{fold_name}.pth")
 
+    history = {'train_loss': [], 'val_loss': [], 'train_f1': [], 'val_f1': []}
+
     for epoch in range(1, EPOCHS + 1):
         current_lr = optimizer.param_groups[0]["lr"]
 
@@ -247,6 +265,11 @@ def train_one_fold(model_name, fold_name, fold_dir):
             desc=f"  [{fold_name}] E{epoch:02d}/{EPOCHS} Val"
         )
         scheduler.step(val_f1)
+
+        history['train_loss'].append(train_loss)
+        history['val_loss'].append(val_loss)
+        history['train_f1'].append(train_f1)
+        history['val_f1'].append(val_f1)
 
         print(
             f"  Epoch {epoch:02d}/{EPOCHS} | LR={current_lr:.2e} | "
@@ -267,6 +290,8 @@ def train_one_fold(model_name, fold_name, fold_dir):
             if patience_count >= PATIENCE:
                 print(f"    Early stopping tai epoch {epoch}.")
                 break
+
+    plot_learning_curve(history, model_name, fold_name)
 
     # Danh gia test set (1 lan duy nhat)
     model.load_state_dict(torch.load(save_path, map_location=DEVICE, weights_only=True))
@@ -294,8 +319,6 @@ def train_one_fold(model_name, fold_name, fold_dir):
 # ==========================================
 # 7. RESUME HELPERS - LUU / LOAD KET QUA TUNG FOLD
 # ==========================================
-import json
-
 def _progress_path(model_name):
     """File JSON luu ket qua cac fold da chay xong."""
     return os.path.join(CHECKPOINT_DIR, f"progress_{model_name}.json")
@@ -354,9 +377,9 @@ def train_pipeline(model_name, folds):
     f1s  = [r["test_f1"]  for r in fold_results]
 
     mean_acc = statistics.mean(accs)
-    std_acc  = statistics.pstdev(accs) if len(accs) > 1 else 0.0
+    std_acc  = statistics.stdev(accs) if len(accs) > 1 else 0.0
     mean_f1  = statistics.mean(f1s)
-    std_f1   = statistics.pstdev(f1s)  if len(f1s)  > 1 else 0.0
+    std_f1   = statistics.stdev(f1s)  if len(f1s)  > 1 else 0.0
 
     print(f"\n  [{display_name}] TONG KET {len(folds)} FOLD:")
     print(f"  Test Acc : {mean_acc:.2f}% +/- {std_acc:.2f}%")

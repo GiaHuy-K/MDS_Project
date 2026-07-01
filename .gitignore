@@ -18,6 +18,7 @@ checkpoints/
 
 # ===== Dataset =====
 dataset_acne04_folds/
+dataset_final_70_15_15/
 Classification/
 kfold_dataset_resized/
 
@@ -28,6 +29,14 @@ gradcam_outputs/
 reports/
 # ===== Jupyter =====
 .ipynb_checkpoints/
+
+# ===== Results CSV =====
+kfold_results_detail.csv
+kfold_results_summary.csv
+
+# ===== Documents =====
+*.docx
+*.doc
 
 # ===== Logs =====
 *.log
