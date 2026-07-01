@@ -99,10 +99,12 @@ python 03_train.py
 Train lần lượt 3 model qua 5 fold. Tham số chính có thể chỉnh trong `03_train.py`:
 
 ```python
-BATCH_SIZE = 16
-EPOCHS     = 100
-LR         = 1e-4
-PATIENCE   = 10
+BATCH_SIZE    = 16
+EPOCHS        = 100
+LR_BACKBONE   = 1e-5   # LR nho cho backbone pretrained
+LR_HEAD       = 1e-4   # LR lon hon cho classifier head moi
+WARMUP_EPOCHS = 3
+PATIENCE      = 10
 ```
 
 Kết quả: checkpoint `checkpoints/best_<model>_<fold>.pth`, CSV tổng hợp tại root.

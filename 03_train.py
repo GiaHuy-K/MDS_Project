@@ -13,6 +13,7 @@ import statistics
 from collections import Counter
 from datetime import datetime
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -28,6 +29,7 @@ from model_utils import (
     NUM_CLASSES,
     CLASS_NAMES,
     get_model,
+    get_param_groups,
     count_params,
     measure_inference_time,
 )
@@ -36,13 +38,19 @@ from paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, EVAL_OUTPUT_DIR, PRO
 # ==========================================
 # 1. CAU HINH
 # ==========================================
-BATCH_SIZE      = 16
-EPOCHS          = 100
-LR              = 1e-4    # Train toan bo model voi 1 LR thong nhat
-PATIENCE        = 10
-WEIGHT_DECAY    = 5e-4
-LABEL_SMOOTHING = 0.1
-RANDOM_SEED     = 42
+BATCH_SIZE        = 16
+EPOCHS            = 100
+LR_BACKBONE       = 1e-5   # LR nho cho backbone da pretrained - chong overfit khi fine-tune
+LR_HEAD           = 1e-4   # LR lon hon cho classifier head moi khoi tao
+WARMUP_EPOCHS     = 3      # so epoch dau tang dan LR tu 0 -> LR muc tieu (on dinh, dac biet cho ShuffleNet)
+PATIENCE          = 10
+WEIGHT_DECAY      = 5e-4
+LABEL_SMOOTHING   = 0.1
+GRAD_CLIP_NORM    = 1.0    # chong no gradient / dao dong dau training
+MIXUP_ALPHA       = 0.2    # 0 = tat mixup
+MIXUP_PROB        = 0.5    # xac suat ap dung mixup cho 1 batch train
+ENABLE_COLOR_JITTER = True # bat/tat de ablation
+RANDOM_SEED       = 42
 
 RESULTS_CSV  = os.path.join(PROJECT_ROOT, "kfold_results_detail.csv")    # ket qua tung fold
 SUMMARY_CSV  = os.path.join(PROJECT_ROOT, "kfold_results_summary.csv")   # trung binh cuoi
@@ -95,16 +103,23 @@ def build_loaders(model_name, fold_dir):
     img_size = cfg["img_size"]
     mean, std = cfg["mean"], cfg["std"]
 
-    train_transforms = transforms.Compose([
+    train_transform_list = [
         transforms.Resize((img_size, img_size),
                           interpolation=transforms.InterpolationMode.BILINEAR,
                           antialias=True),
         transforms.RandomHorizontalFlip(),
         transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1),
+    ]
+    if ENABLE_COLOR_JITTER:
+        train_transform_list.append(
+            transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1)
+        )
+    train_transform_list += [
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
-    ])
+        transforms.RandomErasing(p=0.25, scale=(0.02, 0.15)),
+    ]
+    train_transforms = transforms.Compose(train_transform_list)
     eval_transforms = transforms.Compose([
         transforms.Resize((img_size, img_size),
                           interpolation=transforms.InterpolationMode.BILINEAR,
@@ -120,7 +135,14 @@ def build_loaders(model_name, fold_dir):
     test_dataset  = datasets.ImageFolder(
         root=os.path.join(fold_dir, "test"),  transform=eval_transforms)
 
-    # WeightedRandomSampler: oversample minority class
+    for split_name, ds in (("train", train_dataset), ("val", val_dataset), ("test", test_dataset)):
+        assert ds.classes == CLASS_NAMES, (
+            f"Thu tu class cua ImageFolder ({split_name}) khong khop CLASS_NAMES: "
+            f"{ds.classes} != {CLASS_NAMES}"
+        )
+
+    # WeightedRandomSampler: oversample minority class (KHONG dung them class_weights
+    # trong loss cung luc - tranh double-correction, xem log.md Round 3)
     labels         = [lbl for _, lbl in train_dataset.samples]
     class_counts   = Counter(labels)
     sample_weights = [1.0 / class_counts[lbl] for lbl in labels]
@@ -129,7 +151,7 @@ def build_loaders(model_name, fold_dir):
     )
 
     # num_workers=4: Windows yeu cau if __name__=="__main__" guard (da co o cuoi file)
-    kw = dict(num_workers=4, pin_memory=True)
+    kw = dict(num_workers=4, pin_memory=True, persistent_workers=True)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, **kw)
     val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,   **kw)
     test_loader  = DataLoader(test_dataset,  batch_size=BATCH_SIZE, shuffle=False,   **kw)
@@ -137,17 +159,20 @@ def build_loaders(model_name, fold_dir):
     return train_loader, val_loader, test_loader, train_dataset
 
 
-def build_class_weights(train_dataset):
-    labels  = [lbl for _, lbl in train_dataset.samples]
-    counts  = Counter(labels)
-    total   = sum(counts.values())
-    weights = torch.tensor(
-        [total / counts[i] for i in range(NUM_CLASSES)], dtype=torch.float
-    )
-    weights = weights / weights.mean()
+def log_class_distribution(train_dataset):
+    """In phan bo lop cua tap train de theo doi - KHONG dung de tinh class weight
+    cho loss vi da co WeightedRandomSampler can bang batch roi."""
+    labels = [lbl for _, lbl in train_dataset.samples]
+    counts = Counter(labels)
     print(f"  Class counts : {dict(sorted(counts.items()))}")
-    print(f"  Class weights: {[round(w, 3) for w in weights.tolist()]}")
-    return weights
+
+
+def mixup_data(x, y, alpha):
+    """Tron 2 anh trong batch theo he so lam ~ Beta(alpha, alpha)."""
+    lam = float(np.random.beta(alpha, alpha)) if alpha > 0 else 1.0
+    index = torch.randperm(x.size(0), device=x.device)
+    mixed_x = lam * x + (1 - lam) * x[index]
+    return mixed_x, y, y[index], lam
 
 def plot_learning_curve(history, model_name, fold_name):
     ensure_dirs(EVAL_OUTPUT_DIR)
@@ -183,12 +208,13 @@ def plot_learning_curve(history, model_name, fold_name):
 # ==========================================
 # 5. VONG LAP TRAIN / EVAL MOT EPOCH
 # ==========================================
-def run_epoch(model, loader, criterion, optimizer=None, desc=""):
+def run_epoch(model, loader, criterion, optimizer=None, scaler=None, desc=""):
     """
     Return: (avg_loss, accuracy, macro_f1, all_preds, all_labels)
     optimizer=None -> eval mode
     """
     is_train = optimizer is not None
+    amp_enabled = DEVICE.type == "cuda"
     total_loss, total_correct = 0.0, 0
     all_preds, all_labels = [], []
 
@@ -196,13 +222,25 @@ def run_epoch(model, loader, criterion, optimizer=None, desc=""):
         model.train()
         for inputs, labels in tqdm(loader, desc=desc, leave=False):
             inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
-            outputs = model(inputs)
-            loss    = criterion(outputs, labels)
-            preds   = outputs.argmax(dim=1)
+
+            use_mixup = MIXUP_ALPHA > 0 and torch.rand(1).item() < MIXUP_PROB
+            if use_mixup:
+                inputs, labels_a, labels_b, lam = mixup_data(inputs, labels, MIXUP_ALPHA)
 
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            with torch.amp.autocast(device_type=DEVICE.type, enabled=amp_enabled):
+                outputs = model(inputs)
+                if use_mixup:
+                    loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
+                else:
+                    loss = criterion(outputs, labels)
+            preds = outputs.argmax(dim=1)
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
+            scaler.step(optimizer)
+            scaler.update()
 
             total_loss    += loss.item() * inputs.size(0)
             total_correct += (preds == labels).sum().item()
@@ -213,8 +251,9 @@ def run_epoch(model, loader, criterion, optimizer=None, desc=""):
         with torch.no_grad():
             for inputs, labels in tqdm(loader, desc=desc, leave=False):
                 inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
-                outputs = model(inputs)
-                loss    = criterion(outputs, labels)
+                with torch.amp.autocast(device_type=DEVICE.type, enabled=amp_enabled):
+                    outputs = model(inputs)
+                    loss    = criterion(outputs, labels)
                 preds   = outputs.argmax(dim=1)
 
                 total_loss    += loss.item() * inputs.size(0)
@@ -235,17 +274,21 @@ def train_one_fold(model_name, fold_name, fold_dir):
     print(f"\n  --- {MODEL_CONFIGS[model_name]['display_name']} | {fold_name} ---")
 
     train_loader, val_loader, test_loader, train_ds = build_loaders(model_name, fold_dir)
-    class_weights = build_class_weights(train_ds).to(DEVICE)
+    log_class_distribution(train_ds)
 
     model = get_model(model_name).to(DEVICE)
 
-    criterion_train = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=LABEL_SMOOTHING)
+    criterion_train = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
     criterion_eval  = nn.CrossEntropyLoss()
 
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = optim.AdamW(
+        get_param_groups(model, model_name, LR_BACKBONE, LR_HEAD),
+        weight_decay=WEIGHT_DECAY,
+    )
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=3, min_lr=1e-7
     )
+    scaler = torch.amp.GradScaler(device=DEVICE.type, enabled=(DEVICE.type == "cuda"))
 
     best_val_f1    = 0.0
     patience_count = 0
@@ -254,17 +297,24 @@ def train_one_fold(model_name, fold_name, fold_dir):
     history = {'train_loss': [], 'val_loss': [], 'train_f1': [], 'val_f1': []}
 
     for epoch in range(1, EPOCHS + 1):
-        current_lr = optimizer.param_groups[0]["lr"]
+        if epoch <= WARMUP_EPOCHS:
+            warmup_factor = epoch / WARMUP_EPOCHS
+            optimizer.param_groups[0]["lr"] = LR_BACKBONE * warmup_factor
+            optimizer.param_groups[1]["lr"] = LR_HEAD * warmup_factor
+
+        current_lr_bb   = optimizer.param_groups[0]["lr"]
+        current_lr_head = optimizer.param_groups[1]["lr"]
 
         train_loss, train_acc, train_f1, _, _ = run_epoch(
-            model, train_loader, criterion_train, optimizer,
+            model, train_loader, criterion_train, optimizer, scaler,
             desc=f"  [{fold_name}] E{epoch:02d}/{EPOCHS} Train"
         )
         val_loss, val_acc, val_f1, _, _ = run_epoch(
             model, val_loader, criterion_eval,
             desc=f"  [{fold_name}] E{epoch:02d}/{EPOCHS} Val"
         )
-        scheduler.step(val_f1)
+        if epoch > WARMUP_EPOCHS:
+            scheduler.step(val_f1)
 
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
@@ -272,7 +322,7 @@ def train_one_fold(model_name, fold_name, fold_dir):
         history['val_f1'].append(val_f1)
 
         print(
-            f"  Epoch {epoch:02d}/{EPOCHS} | LR={current_lr:.2e} | "
+            f"  Epoch {epoch:02d}/{EPOCHS} | LR(bb)={current_lr_bb:.2e} LR(head)={current_lr_head:.2e} | "
             f"Train Loss={train_loss:.4f} Acc={train_acc*100:.1f}% F1={train_f1:.4f} | "
             f"Val Loss={val_loss:.4f} Acc={val_acc*100:.1f}% F1={val_f1:.4f}"
         )
@@ -284,9 +334,9 @@ def train_one_fold(model_name, fold_name, fold_dir):
             print(f"    -> Saved best (val_f1={val_f1:.4f} | val_acc={val_acc*100:.2f}%)")
         else:
             patience_count += 1
-            new_lr = optimizer.param_groups[0]["lr"]
-            if new_lr < current_lr:
-                print(f"    [Scheduler] LR: {current_lr:.2e} -> {new_lr:.2e}")
+            new_lr_head = optimizer.param_groups[1]["lr"]
+            if new_lr_head < current_lr_head:
+                print(f"    [Scheduler] LR head: {current_lr_head:.2e} -> {new_lr_head:.2e}")
             if patience_count >= PATIENCE:
                 print(f"    Early stopping tai epoch {epoch}.")
                 break

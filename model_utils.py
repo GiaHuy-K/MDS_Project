@@ -96,6 +96,29 @@ def get_target_layers(model, model_name):
         raise ValueError(f"Model '{model_name}' khong hop le.")
 
 
+def get_param_groups(model, model_name, lr_backbone, lr_head):
+    """Tra ve param_groups cho optimizer: LR nho cho backbone da pretrained,
+    LR lon hon cho classifier head moi khoi tao. Giam overfitting khi fine-tune
+    toan bo mang tren dataset nho (xem log.md - Round 3)."""
+    if model_name == "efficientnet_lite3":
+        head_module = model.classifier
+    elif model_name == "mobilenet_small":
+        head_module = model.classifier
+    elif model_name == "shufflenet":
+        head_module = model.fc
+    else:
+        raise ValueError(f"Model '{model_name}' khong hop le.")
+
+    head_params = list(head_module.parameters())
+    head_ids = {id(p) for p in head_params}
+    backbone_params = [p for p in model.parameters() if id(p) not in head_ids]
+
+    return [
+        {"params": backbone_params, "lr": lr_backbone},
+        {"params": head_params, "lr": lr_head},
+    ]
+
+
 def count_params(model):
     """Dem so tham so (M) va uoc luong dung luong (MB, float32)."""
     total = sum(p.numel() for p in model.parameters())
