@@ -1,16 +1,17 @@
 """
 model_utils.py
-Module dung chung cho 03_train.py / 04_evaluate.py / 05_gradcam.py.
+Shared module for scripts/03_train.py / 04_evaluate.py / 05_gradcam.py.
 
-Chua dinh nghia 3 model NHE dung de so sanh trong de tai:
-  - EfficientNet-Lite3   (model chinh cua de tai, qua timm)
-  - MobileNetV3-Small    (model nhe doi chung, qua torchvision)
-  - ShuffleNetV2-x1.0    (model nhe doi chung, qua torchvision)
+Defines the 3 LIGHTWEIGHT models compared in this study:
+  - EfficientNet-Lite3   (the study's main model, via timm)
+  - MobileNetV3-Small    (lightweight baseline, via torchvision)
+  - ShuffleNetV2-x1.0    (lightweight baseline, via torchvision)
 
-Moi model co "MODEL_CONFIGS" rieng (img_size, mean, std) vi EfficientNet-Lite3
-duoc huan luyen goc o do phan giai 280x280 voi chuan hoa [0.5,0.5,0.5] (theo TF gov),
-trong khi cac model torchvision dung chuan ImageNet thong thuong (224x224, mean/std ImageNet).
-Dung dung config nay giup transfer learning hieu qua hon (khop voi pretrained weights).
+Each model has its own entry in MODEL_CONFIGS (img_size, mean, std). EfficientNet-Lite3
+was originally trained at 280x280 resolution with [0.5, 0.5, 0.5] normalization (TF/Google
+convention), while the torchvision models use the standard ImageNet setup (224x224,
+ImageNet mean/std). Using the correct per-model config makes transfer learning more
+effective (it matches how the pretrained weights were produced).
 """
 
 import torch
@@ -21,14 +22,14 @@ try:
     import timm
 except ImportError as e:
     raise ImportError(
-        "Thieu thu vien 'timm'. Cai dat bang: pip install timm"
+        "Missing the 'timm' package. Install it with: pip install timm"
     ) from e
 
 NUM_CLASSES = 4
 CLASS_NAMES = ["Level_0", "Level_1", "Level_2", "Level_3"]
 
 # ==========================================
-# CAU HINH RIENG CHO TUNG MODEL
+# PER-MODEL CONFIGURATION
 # ==========================================
 MODEL_CONFIGS = {
     "efficientnet_lite3": {
@@ -55,7 +56,7 @@ ALL_MODELS = list(MODEL_CONFIGS.keys())
 
 
 def get_model(model_name, num_classes=NUM_CLASSES, pretrained=True):
-    """Tra ve model da thay classifier cuoi cho phu hop so class cua bai toan."""
+    """Return a model whose final classifier is replaced to match this task's class count."""
     if model_name == "efficientnet_lite3":
         model = timm.create_model(
             "tf_efficientnet_lite3", pretrained=pretrained, num_classes=num_classes
@@ -73,33 +74,33 @@ def get_model(model_name, num_classes=NUM_CLASSES, pretrained=True):
 
     else:
         raise ValueError(
-            f"Model '{model_name}' khong hop le. Chon trong: {ALL_MODELS}"
+            f"Invalid model '{model_name}'. Choose one of: {ALL_MODELS}"
         )
 
     return model
 
 
 def get_target_layers(model, model_name):
-    """Layer conv cuoi cung - noi Grad-CAM tinh gradient/activation."""
+    """The last convolutional layer - where Grad-CAM computes gradients/activations."""
     if model_name == "efficientnet_lite3":
-        # timm EfficientNet: conv_head la conv 1x1 cuoi truoc global pooling
+        # timm EfficientNet: conv_head is the final 1x1 conv before global pooling
         return [model.conv_head]
 
     elif model_name == "mobilenet_small":
         return [model.features[-1]]
 
     elif model_name == "shufflenet":
-        # torchvision ShuffleNetV2: conv5 la block conv cuoi truoc global pool
+        # torchvision ShuffleNetV2: conv5 is the last conv block before global pooling
         return [model.conv5]
 
     else:
-        raise ValueError(f"Model '{model_name}' khong hop le.")
+        raise ValueError(f"Invalid model '{model_name}'.")
 
 
 def get_param_groups(model, model_name, lr_backbone, lr_head):
-    """Tra ve param_groups cho optimizer: LR nho cho backbone da pretrained,
-    LR lon hon cho classifier head moi khoi tao. Giam overfitting khi fine-tune
-    toan bo mang tren dataset nho (xem log.md - Round 3)."""
+    """Return optimizer param_groups: a small LR for the pretrained backbone and a
+    larger LR for the freshly initialized classifier head. This reduces overfitting
+    when fine-tuning the whole network on a small dataset (see log.md - Round 3)."""
     if model_name == "efficientnet_lite3":
         head_module = model.classifier
     elif model_name == "mobilenet_small":
@@ -107,7 +108,7 @@ def get_param_groups(model, model_name, lr_backbone, lr_head):
     elif model_name == "shufflenet":
         head_module = model.fc
     else:
-        raise ValueError(f"Model '{model_name}' khong hop le.")
+        raise ValueError(f"Invalid model '{model_name}'.")
 
     head_params = list(head_module.parameters())
     head_ids = {id(p) for p in head_params}
@@ -120,16 +121,16 @@ def get_param_groups(model, model_name, lr_backbone, lr_head):
 
 
 def count_params(model):
-    """Dem so tham so (M) va uoc luong dung luong (MB, float32)."""
+    """Count parameters (in millions) and estimate size (MB, float32)."""
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    size_mb = total * 4 / (1024 ** 2)  # 4 byte / tham so (float32)
+    size_mb = total * 4 / (1024 ** 2)  # 4 bytes per parameter (float32)
     return total, trainable, size_mb
 
 
 @torch.no_grad()
 def measure_inference_time(model, model_name, device, n_warmup=10, n_runs=50):
-    """Do thoi gian inference trung binh (ms) cho 1 anh, tren thiet bi `device`."""
+    """Measure average inference time (ms) for a single image on the given `device`."""
     import time
 
     img_size = MODEL_CONFIGS[model_name]["img_size"]

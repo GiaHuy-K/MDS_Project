@@ -136,3 +136,57 @@ Kết quả 5-fold ban đầu: EfficientNet-Lite3 61.91%, MobileNetV3-Small 67.0
 
 ### Kỳ vọng
 Chưa chạy lại pipeline để đo kết quả mới. Đã xóa toàn bộ `checkpoints/best_*.pth` và `checkpoints/progress_*.json` (kết quả cũ, trước khi sửa) để lần chạy `03_train.py` tiếp theo train lại từ đầu với code mới — cần kiểm chứng gap train-val có thu hẹp và `std_acc` giữa các fold có giảm hay không.
+
+---
+
+## Round 4 — Tái cấu trúc thư mục cho chuyên nghiệp (2026-07-01)
+
+### Mục tiêu
+Project trước đó có file/folder tên lẫn lộn nhiều kiểu (`01b_...py`, `generate_...py` không theo số thứ tự, output nằm rải rác ở root). Tổ chức lại theo cấu trúc chuẩn: tách source code (`core/`, `scripts/`), tài liệu (`docs/`), dữ liệu (`data/`), và output có thể tái tạo (`outputs/`, `results/`).
+
+### Đổi tên / di chuyển (dùng `git mv` cho file tracked)
+
+| Cũ | Mới |
+|---|---|
+| `paths_config.py` | `core/paths_config.py` |
+| `model_utils.py` | `core/model_utils.py` |
+| `01b_split_dataset_kfold.py` | `scripts/01_split_dataset_kfold.py` |
+| `generate_kfold_from_existing.py` | `scripts/01_split_dataset_from_existing.py` |
+| `02_eda.py` | `scripts/02_eda.py` |
+| `03_train.py` | `scripts/03_train.py` |
+| `04_evaluate.py` | `scripts/04_evaluate.py` |
+| `05_gradcam.py` | `scripts/05_gradcam.py` |
+| `Nhom_02_Draft.docx` | `docs/Nhom_02_Draft.docx` |
+| `dataset_acne04_folds/` (5.3GB) | `data/acne04_folds/` |
+| `eda_outputs/` | `outputs/eda/` (giữ nội dung cũ — không phụ thuộc hyperparameter training) |
+| `kfold_results_*.csv` (khi chạy lại) | `results/kfold_results_*.csv` |
+| Mới thêm | `core/__init__.py` (rỗng, để `from core.xxx import ...` hoạt động) |
+
+### Xóa (output/log lỗi thời, sẽ tái tạo khi chạy lại pipeline với code đã sửa)
+
+| File/folder | Lý do xóa |
+|---|---|
+| `toan_bo_log_chay_qua_dem.txt` (705KB, tracked bởi git) | Log overnight của lần chạy CŨ, trước khi sửa overfitting — giữ lại sẽ gây hiểu nhầm. Xóa bằng `git rm` |
+| `eval_outputs/` (learning curves, confusion matrix, ROC, report — 1.9MB) | Toàn bộ gắn với checkpoint CŨ đã xóa ở Round 3 — sẽ được `04_evaluate.py` tạo lại |
+| `gradcam_outputs/` (heatmap — 1.4MB) | Gắn với checkpoint CŨ đã xóa — sẽ được `05_gradcam.py` tạo lại |
+| `kfold_results_detail.csv`, `kfold_results_summary.csv` | Số liệu accuracy CŨ (61-68%), không còn phản ánh code hiện tại |
+| `__pycache__/` | File biên dịch tạm, luôn tự tạo lại |
+
+### Cập nhật code theo cấu trúc mới
+- `core/paths_config.py`: `PROJECT_ROOT` đổi từ `Path(__file__).parent` → `Path(__file__).parent.parent` (vì file giờ nằm trong `core/`). Thêm `DATA_DIRNAME="data"`, gom `Classification/` và `acne04_folds/` vào trong `data/`. Đổi `REPORT_DIRNAME`/`REPORT_DIR` (chưa từng dùng) thành `RESULTS_DIRNAME`/`RESULTS_DIR = "results"`. Output folders gom vào `OUTPUT_ROOT_DIR = "outputs"` (`outputs/eda`, `outputs/eval`, `outputs/gradcam`).
+- Cả 6 script trong `scripts/`: thêm `sys.path.insert(0, str(Path(__file__).resolve().parent.parent))` trước import, đổi `from paths_config/model_utils import` → `from core.paths_config/model_utils import`.
+- `scripts/03_train.py`: `RESULTS_CSV`/`SUMMARY_CSV` đổi từ ghi tại `PROJECT_ROOT` sang `RESULTS_DIR`.
+- `scripts/01_split_dataset_from_existing.py`: `SOURCE_DIR` đổi từ `PROJECT_ROOT / "dataset_final_70_15_15"` → `DATA_DIR / "dataset_final_70_15_15"`.
+- `run_all.bat`: cập nhật toàn bộ lệnh `python xxx.py` → `python scripts\xxx.py`, kiểm tra dataset tại `data\acne04_folds\...`.
+- `README.md`: viết lại cây thư mục và toàn bộ lệnh chạy (`python scripts/...`), cập nhật đường dẫn output.
+- `.gitignore`: gọn lại — ignore theo thư mục cha (`data/`, `outputs/`, `results/`, `docs/*.docx`) thay vì liệt kê từng thư mục con lẻ tẻ; thêm `*_log_*.txt` để chặn log overnight kiểu cũ lọt vào git lần sau.
+
+### Kiểm chứng
+- `python core/paths_config.py` — toàn bộ đường dẫn resolve đúng.
+- `python scripts/02_eda.py` — chạy thật thành công end-to-end với cấu trúc mới (990/175/292 ảnh train/val/test đúng như trước, ghi đúng vào `outputs/eda/`).
+- Import smoke-test cả 6 script (`01_split_dataset_kfold`, `01_split_dataset_from_existing`, `03_train`, `04_evaluate`, `05_gradcam`, `02_eda`) — tất cả `IMPORT OK`.
+- `python -m py_compile` toàn bộ `core/` + `scripts/` — không lỗi cú pháp.
+
+### Lưu ý
+- Các thay đổi rename/xóa file tracked đã được `git mv`/`git rm` (staged), nhưng **chưa commit** — người dùng tự quyết định khi nào commit.
+- `checkpoints/`, `data/acne04_folds/` (5.3GB dataset đã split, giữ nguyên không đổi nội dung) không bị xóa.

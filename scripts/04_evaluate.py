@@ -1,11 +1,15 @@
 """
-Buoc 4: Danh gia chi tiet 3 model tren test set cua fold_1.
-Output: eval_outputs/cm_*.png, roc_*.png, misclassified_*.csv, summary_eval.csv
+Step 4: Detailed evaluation of the 3 models on all 5 folds.
+Output: outputs/eval/fold_X/cm_*.png, roc_*.png, misclassified_*.csv, summary_eval.csv
 """
 
 import os
 import csv
+import sys
 from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch
@@ -23,31 +27,26 @@ from sklearn.metrics import (
 from sklearn.preprocessing import label_binarize
 from tqdm import tqdm
 
-from model_utils import ALL_MODELS, MODEL_CONFIGS, NUM_CLASSES, CLASS_NAMES, get_model
-from paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, EVAL_OUTPUT_DIR, ensure_dirs
+from core.model_utils import ALL_MODELS, MODEL_CONFIGS, NUM_CLASSES, CLASS_NAMES, get_model
+from core.paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, EVAL_OUTPUT_DIR, ensure_dirs
 
 # ==========================================
-# CAU HINH
+# CONFIGURATION
 # ==========================================
-FOLD_NAME  = "fold_1"    # Dong bo voi 03_train.py
-TEST_DIR   = os.path.join(KFOLD_DATASET_DIR, FOLD_NAME, "test")
+FOLDS      = [f"fold_{i}" for i in range(1, 6)]
 BATCH_SIZE = 32
-OUTPUT_DIR = EVAL_OUTPUT_DIR
-SUMMARY_CSV = os.path.join(OUTPUT_DIR, "summary_eval.csv")
-
-ensure_dirs(OUTPUT_DIR)
+BASE_OUTPUT_DIR = EVAL_OUTPUT_DIR
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Chay tren thiet bi : {DEVICE}")
-print(f"Test set           : {TEST_DIR}")
-print(f"Ket qua luu tai    : {OUTPUT_DIR}")
-print(f"Bat dau            : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+print(f"Running on device  : {DEVICE}")
+print(f"Results saved to   : {BASE_OUTPUT_DIR}")
+print(f"Started            : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
 
 # ==========================================
 # 1. DATALOADER
 # ==========================================
-def build_test_loader(model_name):
+def build_test_loader(model_name, test_dir):
     cfg = MODEL_CONFIGS[model_name]
     img_size = cfg["img_size"]
     eval_transforms = transforms.Compose([
@@ -59,12 +58,12 @@ def build_test_loader(model_name):
         transforms.ToTensor(),
         transforms.Normalize(cfg["mean"], cfg["std"]),
     ])
-    test_dataset = datasets.ImageFolder(root=TEST_DIR, transform=eval_transforms)
+    test_dataset = datasets.ImageFolder(root=test_dir, transform=eval_transforms)
     test_loader  = DataLoader(
         test_dataset, batch_size=BATCH_SIZE,
         shuffle=False, num_workers=0, pin_memory=True
     )
-    print(f"[{model_name}] img_size={img_size} | Test: {len(test_dataset)} anh")
+    print(f"[{model_name}] img_size={img_size} | Test: {len(test_dataset)} images")
     return test_dataset, test_loader
 
 
@@ -96,15 +95,15 @@ def run_inference(model, loader):
 # ==========================================
 # 3. CONFUSION MATRIX
 # ==========================================
-def plot_confusion_matrix(cm, model_name):
+def plot_confusion_matrix(cm, model_name, output_dir):
     display_name = MODEL_CONFIGS[model_name]["display_name"]
 
-    # Tinh % de hien thi ca so luong lan ti le
+    # Compute percentages so we can show both counts and ratios
     cm_pct = cm.astype(float) / cm.sum(axis=1, keepdims=True) * 100
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
 
-    # --- Plot 1: So luong ---
+    # --- Plot 1: Counts ---
     sns.heatmap(
         cm, annot=True, fmt="d", cmap="Blues",
         xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES,
@@ -114,7 +113,7 @@ def plot_confusion_matrix(cm, model_name):
     axes[0].set_ylabel("True",      fontsize=11)
     axes[0].set_title(f"Confusion Matrix (Count)\n{display_name}", fontsize=12)
 
-    # --- Plot 2: Ti le % ---
+    # --- Plot 2: Percentages ---
     sns.heatmap(
         cm_pct, annot=True, fmt=".1f", cmap="Blues",
         xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES,
@@ -126,7 +125,7 @@ def plot_confusion_matrix(cm, model_name):
     axes[1].set_title(f"Confusion Matrix (% per True class)\n{display_name}", fontsize=12)
 
     plt.tight_layout()
-    save_path = os.path.join(OUTPUT_DIR, f"cm_{model_name}.png")
+    save_path = os.path.join(output_dir, f"cm_{model_name}.png")
     plt.savefig(save_path, dpi=150)
     plt.close()
     print(f"  -> Confusion matrix : {save_path}")
@@ -135,7 +134,7 @@ def plot_confusion_matrix(cm, model_name):
 # ==========================================
 # 4. ROC CURVES
 # ==========================================
-def plot_roc_curves(y_true, y_probs, model_name):
+def plot_roc_curves(y_true, y_probs, model_name, output_dir):
     display_name = MODEL_CONFIGS[model_name]["display_name"]
     y_true_bin   = label_binarize(y_true, classes=list(range(NUM_CLASSES)))
 
@@ -181,7 +180,7 @@ def plot_roc_curves(y_true, y_probs, model_name):
     plt.legend(loc="lower right", fontsize=9)
     plt.tight_layout()
 
-    save_path = os.path.join(OUTPUT_DIR, f"roc_{model_name}.png")
+    save_path = os.path.join(output_dir, f"roc_{model_name}.png")
     plt.savefig(save_path, dpi=150)
     plt.close()
     print(f"  -> ROC curves       : {save_path}")
@@ -196,8 +195,8 @@ def plot_roc_curves(y_true, y_probs, model_name):
 # ==========================================
 # 5. MISCLASSIFIED CSV
 # ==========================================
-def save_misclassified(test_dataset, y_true, y_pred, model_name):
-    save_path = os.path.join(OUTPUT_DIR, f"misclassified_{model_name}.csv")
+def save_misclassified(test_dataset, y_true, y_pred, model_name, output_dir):
+    save_path = os.path.join(output_dir, f"misclassified_{model_name}.csv")
     samples   = test_dataset.samples
 
     with open(save_path, "w", newline="", encoding="utf-8") as f:
@@ -214,24 +213,24 @@ def save_misclassified(test_dataset, y_true, y_pred, model_name):
                 count += 1
 
     total = len(samples)
-    print(f"  -> Misclassified    : {count}/{total} anh ({count/total*100:.1f}%) -> {save_path}")
+    print(f"  -> Misclassified    : {count}/{total} images ({count/total*100:.1f}%) -> {save_path}")
     return count
 
 
 # ==========================================
-# 6. DANH GIA 1 MODEL
+# 6. EVALUATE ONE MODEL
 # ==========================================
-def evaluate_model(model_name):
+def evaluate_model(model_name, fold_name, test_dir, output_dir):
     display_name     = MODEL_CONFIGS[model_name]["display_name"]
-    checkpoint_path  = os.path.join(CHECKPOINT_DIR, f"best_{model_name}_{FOLD_NAME}.pth")
+    checkpoint_path  = os.path.join(CHECKPOINT_DIR, f"best_{model_name}_{fold_name}.pth")
 
     print(f"\n{'='*60}")
-    print(f" DANH GIA: {display_name} ({model_name})")
+    print(f" EVALUATING: {display_name} ({model_name}) on {fold_name}")
     print(f"{'='*60}")
 
     if not os.path.exists(checkpoint_path):
-        print(f"  [SKIP] Khong tim thay checkpoint: {checkpoint_path}")
-        print(f"         Hay chay 03_train.py truoc.")
+        print(f"  [SKIP] Checkpoint not found: {checkpoint_path}")
+        print(f"         Run 03_train.py first.")
         return None
 
     # Load model
@@ -242,7 +241,7 @@ def evaluate_model(model_name):
     model.to(DEVICE).eval()
 
     # Inference
-    test_dataset, test_loader = build_test_loader(model_name)
+    test_dataset, test_loader = build_test_loader(model_name, test_dir)
     y_probs, y_pred, y_true   = run_inference(model, test_loader)
 
     # Metrics
@@ -263,20 +262,21 @@ def evaluate_model(model_name):
     cm = confusion_matrix(y_true, y_pred)
     print("  Confusion Matrix:")
     print(cm)
-    plot_confusion_matrix(cm, model_name)
+    plot_confusion_matrix(cm, model_name, output_dir)
 
     # ROC
-    macro_auc, weighted_auc = plot_roc_curves(y_true, y_probs, model_name)
+    macro_auc, weighted_auc = plot_roc_curves(y_true, y_probs, model_name, output_dir)
 
     # Misclassified
-    save_misclassified(test_dataset, y_true, y_pred, model_name)
+    save_misclassified(test_dataset, y_true, y_pred, model_name, output_dir)
 
-    # Luu report chi tiet ra .txt
-    report_path = os.path.join(OUTPUT_DIR, f"report_{model_name}.txt")
+    # Save the detailed report to .txt
+    report_path = os.path.join(output_dir, f"report_{model_name}.txt")
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(f"Model         : {display_name}\n")
+        f.write(f"Fold          : {fold_name}\n")
         f.write(f"Checkpoint    : {checkpoint_path}\n")
-        f.write(f"Test set      : {TEST_DIR}\n")
+        f.write(f"Test set      : {test_dir}\n")
         f.write(f"Timestamp     : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Test Accuracy : {acc*100:.2f}%\n")
         f.write(f"Macro F1      : {macro_f1:.4f}\n")
@@ -287,13 +287,14 @@ def evaluate_model(model_name):
         f.write(report)
         f.write("\nConfusion Matrix:\n")
         f.write(str(cm))
-    print(f"  -> Report chi tiet  : {report_path}")
+    print(f"  -> Detailed report  : {report_path}")
 
     del model
     torch.cuda.empty_cache()
 
     return {
         "model"       : display_name,
+        "fold"        : fold_name,
         "test_acc"    : round(acc * 100, 2),
         "macro_f1"    : round(macro_f1, 4),
         "weighted_f1" : round(wt_f1, 4),
@@ -303,45 +304,44 @@ def evaluate_model(model_name):
 
 
 # ==========================================
-# 7. CHAY CA 3 MODEL & XUAT BANG TONG HOP
+# 7. RUN ALL 3 MODELS ON ALL FOLDS & EXPORT SUMMARY TABLE
 # ==========================================
 if __name__ == "__main__":
-    all_results = []
+    global_results = []
 
-    for model_name in ALL_MODELS:
-        result = evaluate_model(model_name)
-        if result:
-            all_results.append(result)
+    for fold_name in FOLDS:
+        print(f"\n" + "#"*60)
+        print(f" RUNNING EVALUATION FOR: {fold_name}")
+        print("#"*60)
 
-    if not all_results:
-        print("\nKhong co model nao duoc danh gia. Kiem tra lai checkpoint.")
+        test_dir = os.path.join(KFOLD_DATASET_DIR, fold_name, "test")
+        output_dir = os.path.join(BASE_OUTPUT_DIR, fold_name)
+        ensure_dirs(output_dir)
+
+        fold_results = []
+        for model_name in ALL_MODELS:
+            result = evaluate_model(model_name, fold_name, test_dir, output_dir)
+            if result:
+                fold_results.append(result)
+                global_results.append(result)
+
+        if fold_results:
+            # Save summary CSV per fold
+            summary_csv = os.path.join(output_dir, f"summary_eval_{fold_name}.csv")
+            with open(summary_csv, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=list(fold_results[0].keys()))
+                writer.writeheader()
+                writer.writerows(fold_results)
+            print(f"\nSaved fold summary CSV : {summary_csv}")
+
+    if not global_results:
+        print("\nNo model was evaluated. Check the checkpoints.")
     else:
-        # Bang tong hop
-        print("\n" + "=" * 75)
-        print(" BANG TONG HOP - CA 3 MODEL")
-        print(f" Test set: {TEST_DIR}")
-        print("=" * 75)
-        header = (
-            f"{'Model':<22}{'Test Acc':>10}{'Macro F1':>10}"
-            f"{'Wtd F1':>10}{'AUC macro':>12}{'AUC wtd':>10}"
-        )
-        print(header)
-        print("-" * 75)
-        for r in all_results:
-            print(
-                f"{r['model']:<22}"
-                f"{r['test_acc']:>9.2f}%"
-                f"{r['macro_f1']:>10.4f}"
-                f"{r['weighted_f1']:>10.4f}"
-                f"{r['auc_macro']:>12.4f}"
-                f"{r['auc_weighted']:>10.4f}"
-            )
-
-        # Luu summary CSV
-        with open(SUMMARY_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(all_results[0].keys()))
+        # Save global summary CSV
+        global_summary_csv = os.path.join(BASE_OUTPUT_DIR, "summary_eval_all_folds.csv")
+        with open(global_summary_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(global_results[0].keys()))
             writer.writeheader()
-            writer.writerows(all_results)
-
-        print(f"\nDa luu summary CSV : {SUMMARY_CSV}")
-        print(f"Ket thuc           : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            writer.writerows(global_results)
+        print(f"\nSaved global summary CSV : {global_summary_csv}")
+        print(f"Finished           : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

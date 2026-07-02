@@ -1,21 +1,32 @@
 """
-Buoc 1 (phuong an thay the): Tao 5-fold tu dataset da chia san 70/15/15.
-Input: dataset_final_70_15_15/train|val|test/Level_0..3/
-Output: dataset_acne04_folds/fold_1..5/train|val|test/Level_0..3/
+Step 1 (Option B - ALTERNATIVE): Build 5 folds from a pre-split 70/15/15 dataset.
+Input : data/dataset_final_70_15_15/train|val|test/Level_0..3/
+Output: data/acne04_folds/fold_1..5/train|val|test/Level_0..3/
+
+NOTE - there are two "01_" scripts, each a different entry point for Step 1:
+  * 01_split_dataset_kfold.py         - use when you have the RAW ACNE04 release
+                                       (JPEGImages/ + NNEW_*.txt fold files).
+  * 01_split_dataset_from_existing.py (THIS FILE) - use when you only have a pre-split
+                                       70/15/15 dataset; it pools all images and
+                                       regenerates 5 stratified folds.
+Run only ONE of them; both produce the same output layout.
 """
 
 import os
 import shutil
+import sys
 from pathlib import Path
 from collections import defaultdict
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 from sklearn.model_selection import StratifiedKFold, train_test_split
 
-from paths_config import PROJECT_ROOT, KFOLD_DATASET_DIR
-from model_utils import CLASS_NAMES
+from core.paths_config import DATA_DIR, KFOLD_DATASET_DIR
+from core.model_utils import CLASS_NAMES
 
-SOURCE_DIR  = PROJECT_ROOT / "dataset_final_70_15_15"
+SOURCE_DIR  = DATA_DIR / "dataset_final_70_15_15"
 OUTPUT_DIR  = KFOLD_DATASET_DIR
 N_FOLDS     = 5
 VAL_RATIO   = 0.15
@@ -29,7 +40,7 @@ def collect_all_images():
         for cls in CLASS_NAMES:
             cls_dir = SOURCE_DIR / split / cls
             if not cls_dir.exists():
-                print(f"  [SKIP] Khong tim thay: {cls_dir}")
+                print(f"  [SKIP] Not found: {cls_dir}")
                 continue
             for img_file in sorted(cls_dir.iterdir()):
                 if img_file.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp"):
@@ -42,7 +53,7 @@ def create_kfold_splits(all_images):
     paths  = np.array([x[0] for x in all_images])
     labels = np.array([x[1] for x in all_images])
 
-    # Label encode cho StratifiedKFold
+    # Label-encode for StratifiedKFold
     label_to_idx = {c: i for i, c in enumerate(CLASS_NAMES)}
     encoded      = np.array([label_to_idx[l] for l in labels])
 
@@ -52,7 +63,7 @@ def create_kfold_splits(all_images):
     for fold_idx, (trainval_indices, test_indices) in enumerate(skf.split(paths, encoded), start=1):
         fold_name = f"fold_{fold_idx}"
 
-        # Tach val tu trainval
+        # Carve val out of trainval
         trainval_paths   = paths[trainval_indices]
         trainval_encoded = encoded[trainval_indices]
 
@@ -75,7 +86,7 @@ def create_kfold_splits(all_images):
 
 def copy_fold_data(folds):
     if OUTPUT_DIR.exists():
-        print(f"  Dang xoa thu muc cu: {OUTPUT_DIR}")
+        print(f"  Removing old folder: {OUTPUT_DIR}")
         shutil.rmtree(OUTPUT_DIR)
 
     total_copied = 0
@@ -88,7 +99,7 @@ def copy_fold_data(folds):
                 dst_dir.mkdir(parents=True, exist_ok=True)
 
                 dst_path = dst_dir / Path(src_path).name
-                # Xu ly trung ten file (co the anh tu train/ va test/ trung ten)
+                # Handle duplicate file names (an image may appear in both train/ and test/)
                 if dst_path.exists():
                     stem = dst_path.stem
                     suffix = dst_path.suffix
@@ -102,43 +113,43 @@ def copy_fold_data(folds):
                 total_copied += 1
 
             count_str = " | ".join(f"{c}: {counts[c]}" for c in CLASS_NAMES)
-            print(f"  {split_name:5s}: {sum(counts.values()):4d} anh ({count_str})")
+            print(f"  {split_name:5s}: {sum(counts.values()):4d} images ({count_str})")
 
     return total_copied
 
 
 def main():
     print("=" * 60)
-    print(" TAO 5-FOLD CROSS-VALIDATION TU DATASET HIEN CO")
+    print(" BUILD 5-FOLD CROSS-VALIDATION FROM EXISTING DATASET")
     print("=" * 60)
-    print(f"Nguon : {SOURCE_DIR}")
+    print(f"Source: {SOURCE_DIR}")
     print(f"Output: {OUTPUT_DIR}")
     print(f"Folds : {N_FOLDS}")
 
     if not SOURCE_DIR.exists():
-        raise FileNotFoundError(f"Khong tim thay dataset: {SOURCE_DIR}")
+        raise FileNotFoundError(f"Dataset not found: {SOURCE_DIR}")
 
-    print("\n--- Thu thap tat ca anh ---")
+    print("\n--- Collecting all images ---")
     all_images = collect_all_images()
-    print(f"  Tong cong: {len(all_images)} anh")
+    print(f"  Total: {len(all_images)} images")
 
-    # Thong ke
+    # Statistics
     class_counts = defaultdict(int)
     for _, cls in all_images:
         class_counts[cls] += 1
     for cls in CLASS_NAMES:
-        print(f"  {cls}: {class_counts[cls]} anh")
+        print(f"  {cls}: {class_counts[cls]} images")
 
-    print(f"\n--- Tao {N_FOLDS} stratified fold ---")
+    print(f"\n--- Creating {N_FOLDS} stratified folds ---")
     folds = create_kfold_splits(all_images)
 
-    print(f"\n--- Copy anh vao cau truc fold ---")
+    print(f"\n--- Copying images into fold structure ---")
     total = copy_fold_data(folds)
 
     print(f"\n{'=' * 60}")
-    print(f" HOAN TAT! Da copy {total} anh vao {N_FOLDS} fold.")
-    print(f" Thu muc output: {OUTPUT_DIR}")
-    print(f" Cau truc: {OUTPUT_DIR}/fold_X/train|val|test/Level_0..3/")
+    print(f" DONE! Copied {total} images into {N_FOLDS} folds.")
+    print(f" Output folder: {OUTPUT_DIR}")
+    print(f" Layout: {OUTPUT_DIR}/fold_X/train|val|test/Level_0..3/")
     print(f"{'=' * 60}")
 
 

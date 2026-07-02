@@ -1,18 +1,29 @@
 """
-Buoc 1: Chia dataset ACNE04 thanh 5 fold dua tren file .txt goc
-(NNEW_trainval_<fold>.txt / NNEW_test_<fold>.txt).
+Step 1 (Option A - PRIMARY): Split the ACNE04 dataset into 5 folds using the
+original .txt fold files (NNEW_trainval_<fold>.txt / NNEW_test_<fold>.txt).
 
-Output: dataset_acne04_folds/fold_1..5/train|val|test/Level_0..3/
+Output: data/acne04_folds/fold_1..5/train|val|test/Level_0..3/
+
+NOTE - there are two "01_" scripts, each a different entry point for Step 1:
+  * 01_split_dataset_kfold.py         (THIS FILE) - use when you have the RAW ACNE04
+                                       release (JPEGImages/ + NNEW_*.txt fold files).
+  * 01_split_dataset_from_existing.py - use when you only have a pre-split
+                                       70/15/15 dataset and want to rebuild 5 folds.
+Run only ONE of them; both produce the same output layout.
 """
 
 import os
 import re
 import glob
 import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sklearn.model_selection import train_test_split
 
-from paths_config import IMAGE_SOURCE_DIR, TXT_DIR, KFOLD_DATASET_DIR
+from core.paths_config import IMAGE_SOURCE_DIR, TXT_DIR, KFOLD_DATASET_DIR
 
 TRAINVAL_PATTERN      = "NNEW_trainval_*.txt"
 TEST_PATTERN          = "NNEW_test_*.txt"
@@ -22,7 +33,7 @@ VALID_LEVELS          = {0, 1, 2, 3}
 
 
 def parse_line(line):
-    """Parse 1 dong file .txt -> (img_name, level) hoac None."""
+    """Parse one line of a .txt file -> (img_name, level) or None."""
     line = line.strip()
     if not line:
         return None
@@ -32,7 +43,7 @@ def parse_line(line):
         return None
 
     img_name = os.path.basename(parts[0])
-    label_raw = parts[1]  # cot 2 = do nang (0-3), khong dung parts[-1] (lesion count)
+    label_raw = parts[1]  # column 2 = severity (0-3); do NOT use parts[-1] (lesion count)
 
     match = re.search(r"\d+", label_raw)
     if not match:
@@ -47,7 +58,7 @@ def parse_line(line):
 
 
 def load_fold_file(txt_path):
-    """Doc file .txt, tra ve list[(img_name, level)]."""
+    """Read a .txt file and return list[(img_name, level)]."""
     items = []
     skipped = 0
     with open(txt_path, "r", encoding="utf-8") as f:
@@ -60,7 +71,7 @@ def load_fold_file(txt_path):
             else:
                 skipped += 1
     if skipped:
-        print(f"    Canh bao: bo qua {skipped} dong khong parse duoc trong {os.path.basename(txt_path)}")
+        print(f"    Warning: skipped {skipped} unparseable line(s) in {os.path.basename(txt_path)}")
     return items
 
 
@@ -69,7 +80,7 @@ def copy_images(items, split_name, fold_dir, src_dir, out_dir):
     for img_name, level in items:
         src_path = os.path.join(src_dir, img_name)
         if not os.path.exists(src_path):
-            print(f"    Bo qua (khong tim thay anh): {img_name}")
+            print(f"    Skipping (image not found): {img_name}")
             continue
         dst_dir = os.path.join(out_dir, fold_dir, split_name, f"Level_{level}")
         os.makedirs(dst_dir, exist_ok=True)
@@ -89,29 +100,29 @@ def extract_fold_id(filename):
 
 
 def main():
-    print("--- Dang chia dataset theo K-FOLD goc cua ACNE04 ---")
-    print(f"Nguon anh : {IMAGE_SOURCE_DIR}")
-    print(f"Thu muc txt: {TXT_DIR}")
-    print(f"Output     : {KFOLD_DATASET_DIR}")
+    print("--- Splitting dataset by ACNE04's original K-FOLD files ---")
+    print(f"Image source: {IMAGE_SOURCE_DIR}")
+    print(f"Txt folder  : {TXT_DIR}")
+    print(f"Output      : {KFOLD_DATASET_DIR}")
 
     if not os.path.exists(IMAGE_SOURCE_DIR):
-        raise FileNotFoundError(f"Khong tim thay thu muc anh: {IMAGE_SOURCE_DIR}")
+        raise FileNotFoundError(f"Image folder not found: {IMAGE_SOURCE_DIR}")
 
     trainval_files = find_fold_files(TRAINVAL_PATTERN)
     test_files = find_fold_files(TEST_PATTERN)
 
     if not trainval_files or not test_files:
         raise FileNotFoundError(
-            f"Khong tim thay file fold trong {TXT_DIR}.\n"
-            f"  Tim theo mau: '{TRAINVAL_PATTERN}' va '{TEST_PATTERN}'.\n"
-            f"  Neu ten file cua ban khac, sua TRAINVAL_PATTERN / TEST_PATTERN o tren."
+            f"No fold files found in {TXT_DIR}.\n"
+            f"  Searched with patterns: '{TRAINVAL_PATTERN}' and '{TEST_PATTERN}'.\n"
+            f"  If your file names differ, edit TRAINVAL_PATTERN / TEST_PATTERN above."
         )
 
     if os.path.exists(KFOLD_DATASET_DIR):
-        print("Dang don dep folder cu...")
+        print("Cleaning up old output folder...")
         shutil.rmtree(KFOLD_DATASET_DIR)
 
-    print(f"\nTim thay {len(trainval_files)} file trainval, {len(test_files)} file test.")
+    print(f"\nFound {len(trainval_files)} trainval file(s), {len(test_files)} test file(s).")
 
     for trainval_path in trainval_files:
         fold_id = extract_fold_id(trainval_path)
@@ -119,7 +130,7 @@ def main():
 
         matching_test = [t for t in test_files if extract_fold_id(t) == fold_id]
         if not matching_test:
-            print(f"  Bo qua fold {fold_id}: khong tim thay file test tuong ung.")
+            print(f"  Skipping fold {fold_id}: no matching test file found.")
             continue
         test_path = matching_test[0]
 
@@ -141,7 +152,7 @@ def main():
 
         print(f"  Train: {n_train} | Val: {n_val} | Test: {n_test}")
 
-    print(f"\nHoan tat! Output: {KFOLD_DATASET_DIR}")
+    print(f"\nDone! Output: {KFOLD_DATASET_DIR}")
 
 
 if __name__ == "__main__":

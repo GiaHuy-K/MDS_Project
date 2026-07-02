@@ -16,32 +16,25 @@ checkpoints/
 *.h5
 *.onnx
 
-# ===== Dataset =====
-dataset_acne04_folds/
-dataset_final_70_15_15/
-Classification/
-kfold_dataset_resized/
+# ===== Dataset (raw + generated, khong tracked) =====
+data/
 
-# ===== Output folders =====
-eda_outputs/
-eval_outputs/
-gradcam_outputs/
-reports/
+# ===== Output folders (regenerate bang cach chay lai scripts/) =====
+outputs/
+results/
+
 # ===== Jupyter =====
 .ipynb_checkpoints/
 
-# ===== Results CSV =====
-kfold_results_detail.csv
-kfold_results_summary.csv
-
 # ===== Documents =====
-*.docx
-*.doc
+docs/*.docx
+docs/*.doc
 
 # ===== Logs =====
 *.log
 runs/
 logs/
+*_log_*.txt
 
 # ===== OS / Editor =====
 .DS_Store

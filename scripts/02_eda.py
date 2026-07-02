@@ -1,15 +1,19 @@
 """
-Buoc 2: EDA — kiem tra phan bo du lieu, phat hien anh loi, ve bieu do.
-Output: eda_outputs/class_distribution.png, sample_images.png
+Step 2: EDA - inspect data distribution, detect corrupt images, plot charts.
+Output: outputs/eda/class_distribution.png, sample_images.png
 """
 
 import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import matplotlib.pyplot as plt
 from PIL import Image
 
-from paths_config import KFOLD_DATASET_DIR, EDA_OUTPUT_DIR, ensure_dirs
-from model_utils import CLASS_NAMES
+from core.paths_config import KFOLD_DATASET_DIR, EDA_OUTPUT_DIR, ensure_dirs
+from core.model_utils import CLASS_NAMES
 
 FOLD_NAME   = "fold_1"
 DATA_DIR    = str(KFOLD_DATASET_DIR / FOLD_NAME)
@@ -66,15 +70,15 @@ def plot_class_distribution(counts, output_dir):
 
     ax.set_xticks([pos + width for pos in x])
     ax.set_xticklabels(CLASS_NAMES)
-    ax.set_ylabel("So luong anh")
-    ax.set_title("Phan bo so luong anh theo class va split")
+    ax.set_ylabel("Number of images")
+    ax.set_title("Image count distribution by class and split")
     ax.legend()
 
     plt.tight_layout()
     save_path = os.path.join(output_dir, "class_distribution.png")
     plt.savefig(save_path, dpi=150)
     plt.close()
-    print(f"  Da luu bieu do phan bo lop -> {save_path}")
+    print(f"  Saved class distribution chart -> {save_path}")
 
 
 def plot_sample_images(data_dir, output_dir, n_samples=4):
@@ -97,50 +101,50 @@ def plot_sample_images(data_dir, output_dir, n_samples=4):
                 ax.text(-0.1, 0.5, cls, transform=ax.transAxes,
                         rotation=90, va="center", ha="right", fontsize=12)
 
-    plt.suptitle("Anh mau moi Level (tu tap train)")
+    plt.suptitle("Sample images per Level (from the train set)")
     plt.tight_layout()
     save_path = os.path.join(output_dir, "sample_images.png")
     plt.savefig(save_path, dpi=150)
     plt.close()
-    print(f"  Da luu anh mau -> {save_path}")
+    print(f"  Saved sample images -> {save_path}")
 
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    print("--- EDA: Dem so luong anh ---")
+    print("--- EDA: Counting images ---")
     counts = count_images_per_class(DATA_DIR)
     for split in SPLITS:
         total = sum(counts[split].values())
-        print(f"\n{split.upper()} (tong {total} anh):")
+        print(f"\n{split.upper()} (total {total} images):")
         for cls in CLASS_NAMES:
             pct = counts[split][cls] / total * 100 if total > 0 else 0
-            print(f"  {cls}: {counts[split][cls]} anh ({pct:.1f}%)")
+            print(f"  {cls}: {counts[split][cls]} images ({pct:.1f}%)")
 
-    print("\n--- EDA: Kiem tra anh loi va kich thuoc ---")
+    print("\n--- EDA: Checking for corrupt images and sizes ---")
     broken, sizes = check_broken_images(DATA_DIR)
 
     if broken:
-        print(f"  Phat hien {len(broken)} anh loi:")
+        print(f"  Found {len(broken)} corrupt image(s):")
         for fpath, err in broken[:10]:
             print(f"    {fpath} -> {err}")
         if len(broken) > 10:
-            print(f"    ... va {len(broken) - 10} file khac")
+            print(f"    ... and {len(broken) - 10} more file(s)")
     else:
-        print("  Khong phat hien anh loi.")
+        print("  No corrupt images found.")
 
     if sizes:
         widths  = [s[0] for s in sizes]
         heights = [s[1] for s in sizes]
-        print(f"  Kich thuoc anh: rong {min(widths)}-{max(widths)}px, "
-              f"cao {min(heights)}-{max(heights)}px, "
-              f"trung binh {sum(widths)//len(widths)}x{sum(heights)//len(heights)}px")
+        print(f"  Image sizes: width {min(widths)}-{max(widths)}px, "
+              f"height {min(heights)}-{max(heights)}px, "
+              f"mean {sum(widths)//len(widths)}x{sum(heights)//len(heights)}px")
 
-    print("\n--- EDA: Ve bieu do ---")
+    print("\n--- EDA: Plotting charts ---")
     plot_class_distribution(counts, OUTPUT_DIR)
     plot_sample_images(DATA_DIR, OUTPUT_DIR)
 
-    print(f"\nHoan tat! Xem ket qua trong thu muc '{OUTPUT_DIR}/'")
+    print(f"\nDone! See results in the '{OUTPUT_DIR}/' folder")
 
 
 if __name__ == "__main__":

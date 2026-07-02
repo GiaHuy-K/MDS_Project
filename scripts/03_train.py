@@ -1,17 +1,21 @@
 """
-Buoc 3: Training pipeline — 5-Fold Cross Validation voi 3 model nhe.
+Step 3: Training pipeline - 5-Fold Cross Validation with 3 lightweight models.
 
-Model: EfficientNet-Lite3 (chinh), MobileNetV3-Small, ShuffleNetV2-x1.0
-Chon best checkpoint theo Val Macro F1 (phu hop class imbalance).
-Output: checkpoints/best_<model>_<fold>.pth, kfold_results_detail.csv, kfold_results_summary.csv
+Models: EfficientNet-Lite3 (main), MobileNetV3-Small, ShuffleNetV2-x1.0
+Best checkpoint is selected by Val Macro F1 (robust to class imbalance).
+Output: checkpoints/best_<model>_<fold>.pth, results/kfold_results_detail.csv, results/kfold_results_summary.csv
 """
 
 import os
 import csv
 import json
 import statistics
+import sys
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch
@@ -23,7 +27,7 @@ from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from model_utils import (
+from core.model_utils import (
     ALL_MODELS,
     MODEL_CONFIGS,
     NUM_CLASSES,
@@ -33,28 +37,30 @@ from model_utils import (
     count_params,
     measure_inference_time,
 )
-from paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, EVAL_OUTPUT_DIR, PROJECT_ROOT, ensure_dirs
+from core.paths_config import (
+    KFOLD_DATASET_DIR, CHECKPOINT_DIR, EVAL_OUTPUT_DIR, RESULTS_DIR, ensure_dirs
+)
 
 # ==========================================
-# 1. CAU HINH
+# 1. CONFIGURATION
 # ==========================================
 BATCH_SIZE        = 16
 EPOCHS            = 100
-LR_BACKBONE       = 1e-5   # LR nho cho backbone da pretrained - chong overfit khi fine-tune
-LR_HEAD           = 1e-4   # LR lon hon cho classifier head moi khoi tao
-WARMUP_EPOCHS     = 3      # so epoch dau tang dan LR tu 0 -> LR muc tieu (on dinh, dac biet cho ShuffleNet)
+LR_BACKBONE       = 1e-5   # small LR for the pretrained backbone - curbs overfitting when fine-tuning
+LR_HEAD           = 1e-4   # larger LR for the freshly initialized classifier head
+WARMUP_EPOCHS     = 3      # first few epochs ramp LR from 0 -> target (stabilizes training, esp. ShuffleNet)
 PATIENCE          = 10
 WEIGHT_DECAY      = 5e-4
 LABEL_SMOOTHING   = 0.1
-GRAD_CLIP_NORM    = 1.0    # chong no gradient / dao dong dau training
-MIXUP_ALPHA       = 0.2    # 0 = tat mixup
-MIXUP_PROB        = 0.5    # xac suat ap dung mixup cho 1 batch train
-ENABLE_COLOR_JITTER = True # bat/tat de ablation
+GRAD_CLIP_NORM    = 1.0    # guards against exploding gradients / early-training instability
+MIXUP_ALPHA       = 0.2    # 0 = disable mixup
+MIXUP_PROB        = 0.5    # probability of applying mixup to a given train batch
+ENABLE_COLOR_JITTER = True # toggle for ablation
 RANDOM_SEED       = 42
 
-RESULTS_CSV  = os.path.join(PROJECT_ROOT, "kfold_results_detail.csv")    # ket qua tung fold
-SUMMARY_CSV  = os.path.join(PROJECT_ROOT, "kfold_results_summary.csv")   # trung binh cuoi
-ensure_dirs(CHECKPOINT_DIR)
+RESULTS_CSV  = os.path.join(RESULTS_DIR, "kfold_results_detail.csv")    # per-fold results
+SUMMARY_CSV  = os.path.join(RESULTS_DIR, "kfold_results_summary.csv")   # final averages
+ensure_dirs(CHECKPOINT_DIR, RESULTS_DIR)
 
 torch.manual_seed(RANDOM_SEED)
 torch.cuda.manual_seed(RANDOM_SEED)
@@ -62,21 +68,21 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark     = False
 
 # ==========================================
-# 2. THIET BI
+# 2. DEVICE
 # ==========================================
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Chay tren thiet bi : {DEVICE}")
-print(f"Bat dau            : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"Running on device  : {DEVICE}")
+print(f"Started            : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 # ==========================================
-# 3. TIM FOLD TU DONG
+# 3. AUTO-DISCOVER FOLDS
 # ==========================================
 def discover_folds():
     if not os.path.isdir(KFOLD_DATASET_DIR):
         raise FileNotFoundError(
-            f"Khong tim thay: {KFOLD_DATASET_DIR}\n"
-            f"Hay chay 01b_split_dataset_kfold.py truoc."
+            f"Not found: {KFOLD_DATASET_DIR}\n"
+            f"Run scripts/01_split_dataset_kfold.py first."
         )
     folds = sorted(
         [
@@ -87,10 +93,9 @@ def discover_folds():
         key=lambda x: int(x.split("_")[-1]) if x.split("_")[-1].isdigit() else x,
     )
     if not folds:
-        raise FileNotFoundError(f"Khong tim thay fold nao trong {KFOLD_DATASET_DIR}")
-    print(f"Tim thay {len(folds)} fold: {folds}\n")
+        raise FileNotFoundError(f"No folds found in {KFOLD_DATASET_DIR}")
+    print(f"Found {len(folds)} fold(s): {folds}\n")
     return folds
-
 
 
 
@@ -135,14 +140,16 @@ def build_loaders(model_name, fold_dir):
     test_dataset  = datasets.ImageFolder(
         root=os.path.join(fold_dir, "test"),  transform=eval_transforms)
 
+    # Guard: ImageFolder sorts class folders alphabetically, so its label order must
+    # match CLASS_NAMES - otherwise reports/plots would show mislabeled classes.
     for split_name, ds in (("train", train_dataset), ("val", val_dataset), ("test", test_dataset)):
         assert ds.classes == CLASS_NAMES, (
-            f"Thu tu class cua ImageFolder ({split_name}) khong khop CLASS_NAMES: "
+            f"ImageFolder class order ({split_name}) does not match CLASS_NAMES: "
             f"{ds.classes} != {CLASS_NAMES}"
         )
 
-    # WeightedRandomSampler: oversample minority class (KHONG dung them class_weights
-    # trong loss cung luc - tranh double-correction, xem log.md Round 3)
+    # WeightedRandomSampler: oversample the minority classes (do NOT also use class_weights
+    # in the loss - that would be double-correction, see log.md Round 3)
     labels         = [lbl for _, lbl in train_dataset.samples]
     class_counts   = Counter(labels)
     sample_weights = [1.0 / class_counts[lbl] for lbl in labels]
@@ -150,7 +157,7 @@ def build_loaders(model_name, fold_dir):
         weights=sample_weights, num_samples=len(sample_weights), replacement=True
     )
 
-    # num_workers=4: Windows yeu cau if __name__=="__main__" guard (da co o cuoi file)
+    # num_workers=4 on Windows requires the if __name__=="__main__" guard (present at file end)
     kw = dict(num_workers=4, pin_memory=True, persistent_workers=True)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, **kw)
     val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,   **kw)
@@ -160,15 +167,15 @@ def build_loaders(model_name, fold_dir):
 
 
 def log_class_distribution(train_dataset):
-    """In phan bo lop cua tap train de theo doi - KHONG dung de tinh class weight
-    cho loss vi da co WeightedRandomSampler can bang batch roi."""
+    """Print the train-set class distribution for monitoring - NOT used to compute a
+    loss class weight, since WeightedRandomSampler already balances each batch."""
     labels = [lbl for _, lbl in train_dataset.samples]
     counts = Counter(labels)
     print(f"  Class counts : {dict(sorted(counts.items()))}")
 
 
 def mixup_data(x, y, alpha):
-    """Tron 2 anh trong batch theo he so lam ~ Beta(alpha, alpha)."""
+    """Blend two images within a batch by a factor lam ~ Beta(alpha, alpha)."""
     lam = float(np.random.beta(alpha, alpha)) if alpha > 0 else 1.0
     index = torch.randperm(x.size(0), device=x.device)
     mixed_x = lam * x + (1 - lam) * x[index]
@@ -177,9 +184,9 @@ def mixup_data(x, y, alpha):
 def plot_learning_curve(history, model_name, fold_name):
     ensure_dirs(EVAL_OUTPUT_DIR)
     epochs = range(1, len(history['train_loss']) + 1)
-    
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-    
+
     # Loss plot
     ax1.plot(epochs, history['train_loss'], 'b-', label='Train Loss')
     ax1.plot(epochs, history['val_loss'], 'r-', label='Val Loss')
@@ -188,7 +195,7 @@ def plot_learning_curve(history, model_name, fold_name):
     ax1.set_ylabel('Loss')
     ax1.legend()
     ax1.grid(True)
-    
+
     # F1 plot
     ax2.plot(epochs, history['train_f1'], 'b-', label='Train Macro F1')
     ax2.plot(epochs, history['val_f1'], 'r-', label='Val Macro F1')
@@ -197,7 +204,7 @@ def plot_learning_curve(history, model_name, fold_name):
     ax2.set_ylabel('Macro F1')
     ax2.legend()
     ax2.grid(True)
-    
+
     plt.tight_layout()
     save_path = os.path.join(EVAL_OUTPUT_DIR, f"learning_curve_{model_name}_{fold_name}.png")
     plt.savefig(save_path, dpi=150)
@@ -206,7 +213,7 @@ def plot_learning_curve(history, model_name, fold_name):
 
 
 # ==========================================
-# 5. VONG LAP TRAIN / EVAL MOT EPOCH
+# 5. TRAIN / EVAL LOOP FOR ONE EPOCH
 # ==========================================
 def run_epoch(model, loader, criterion, optimizer=None, scaler=None, desc=""):
     """
@@ -268,7 +275,7 @@ def run_epoch(model, loader, criterion, optimizer=None, scaler=None, desc=""):
 
 
 # ==========================================
-# 6. TRAIN 1 FOLD
+# 6. TRAIN ONE FOLD
 # ==========================================
 def train_one_fold(model_name, fold_name, fold_dir):
     print(f"\n  --- {MODEL_CONFIGS[model_name]['display_name']} | {fold_name} ---")
@@ -297,6 +304,7 @@ def train_one_fold(model_name, fold_name, fold_dir):
     history = {'train_loss': [], 'val_loss': [], 'train_f1': [], 'val_f1': []}
 
     for epoch in range(1, EPOCHS + 1):
+        # Linear LR warmup for the first WARMUP_EPOCHS epochs (both param groups)
         if epoch <= WARMUP_EPOCHS:
             warmup_factor = epoch / WARMUP_EPOCHS
             optimizer.param_groups[0]["lr"] = LR_BACKBONE * warmup_factor
@@ -313,6 +321,7 @@ def train_one_fold(model_name, fold_name, fold_dir):
             model, val_loader, criterion_eval,
             desc=f"  [{fold_name}] E{epoch:02d}/{EPOCHS} Val"
         )
+        # Only let the plateau scheduler act after warmup is finished
         if epoch > WARMUP_EPOCHS:
             scheduler.step(val_f1)
 
@@ -338,12 +347,12 @@ def train_one_fold(model_name, fold_name, fold_dir):
             if new_lr_head < current_lr_head:
                 print(f"    [Scheduler] LR head: {current_lr_head:.2e} -> {new_lr_head:.2e}")
             if patience_count >= PATIENCE:
-                print(f"    Early stopping tai epoch {epoch}.")
+                print(f"    Early stopping at epoch {epoch}.")
                 break
 
     plot_learning_curve(history, model_name, fold_name)
 
-    # Danh gia test set (1 lan duy nhat)
+    # Evaluate on the test set (exactly once)
     model.load_state_dict(torch.load(save_path, map_location=DEVICE, weights_only=True))
     test_loss, test_acc, test_f1, test_preds, test_labels = run_epoch(
         model, test_loader, criterion_eval,
@@ -367,60 +376,60 @@ def train_one_fold(model_name, fold_name, fold_dir):
 
 
 # ==========================================
-# 7. RESUME HELPERS - LUU / LOAD KET QUA TUNG FOLD
+# 7. RESUME HELPERS - SAVE / LOAD PER-FOLD RESULTS
 # ==========================================
 def _progress_path(model_name):
-    """File JSON luu ket qua cac fold da chay xong."""
+    """JSON file storing the results of already-completed folds."""
     return os.path.join(CHECKPOINT_DIR, f"progress_{model_name}.json")
 
 def load_progress(model_name):
-    """Doc ket qua cac fold da chay truoc do. Tra ve dict {fold_name: result}."""
+    """Read results of previously completed folds. Returns dict {fold_name: result}."""
     path = _progress_path(model_name)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        print(f"  [Resume] Tim thay {len(data)} fold da chay: {list(data.keys())}")
+        print(f"  [Resume] Found {len(data)} completed fold(s): {list(data.keys())}")
         return data
     return {}
 
 def save_progress(model_name, fold_name, result):
-    """Luu ket qua 1 fold vao JSON ngay sau khi fold do ket thuc."""
+    """Save one fold's result to JSON right after that fold finishes."""
     path  = _progress_path(model_name)
     data  = load_progress(model_name) if os.path.exists(path) else {}
     data[fold_name] = result
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-    print(f"  [Resume] Da luu progress -> {path}")
+    print(f"  [Resume] Saved progress -> {path}")
 
 
 # ==========================================
-# 8. TRAIN PIPELINE 1 MODEL QUA TAT CA FOLD
+# 8. TRAIN ONE MODEL ACROSS ALL FOLDS
 # ==========================================
 def train_pipeline(model_name, folds):
     display_name = MODEL_CONFIGS[model_name]["display_name"]
     print(f"\n{'='*65}")
-    print(f" HUAN LUYEN: {display_name} ({model_name}) | {len(folds)} fold")
+    print(f" TRAINING: {display_name} ({model_name}) | {len(folds)} fold(s)")
     print(f"{'='*65}")
 
-    # Load ket qua cac fold da chay truoc do (neu co)
+    # Load results of previously completed folds (if any)
     done = load_progress(model_name)
 
     fold_results = []
     for fold_name in folds:
         if fold_name in done:
-            # SKIP: fold nay da chay roi, lay ket qua cu
+            # SKIP: this fold already ran, reuse its stored result
             r = done[fold_name]
-            print(f"\n  [SKIP] {fold_name} da co ket qua: "
+            print(f"\n  [SKIP] {fold_name} already has a result: "
                   f"Test Acc={r['test_acc']}% | F1={r['test_f1']}")
             fold_results.append(r)
             continue
 
-        # TRAIN: fold nay chua co ket qua
+        # TRAIN: this fold has no result yet
         fold_dir = os.path.join(KFOLD_DATASET_DIR, fold_name)
         result   = train_one_fold(model_name, fold_name, fold_dir)
         fold_results.append(result)
 
-        # Luu ngay sau khi fold xong -> Colab crash van khong mat
+        # Save immediately after the fold finishes -> survives a Colab crash
         save_progress(model_name, fold_name, result)
 
     accs = [r["test_acc"] for r in fold_results]
@@ -431,11 +440,11 @@ def train_pipeline(model_name, folds):
     mean_f1  = statistics.mean(f1s)
     std_f1   = statistics.stdev(f1s)  if len(f1s)  > 1 else 0.0
 
-    print(f"\n  [{display_name}] TONG KET {len(folds)} FOLD:")
+    print(f"\n  [{display_name}] SUMMARY OVER {len(folds)} FOLD(S):")
     print(f"  Test Acc : {mean_acc:.2f}% +/- {std_acc:.2f}%")
     print(f"  Macro F1 : {mean_f1:.4f} +/- {std_f1:.4f}")
 
-    # Tinh lightweight metrics (dung fold_1 de do, khong train them)
+    # Compute lightweight metrics (measured on fold_1's checkpoint, no extra training)
     ckpt_path = os.path.join(CHECKPOINT_DIR, f"best_{model_name}_fold_1.pth")
     total_params, _, size_mb, cpu_ms, gpu_ms = 0, 0, 0.0, 0.0, None
     if os.path.exists(ckpt_path):
@@ -486,9 +495,9 @@ if __name__ == "__main__":
                 "best_val_f1": fd["best_val_f1"],
             })
 
-    # ---- Bang tong ket ----
+    # ---- Summary table ----
     print("\n" + "=" * 80)
-    print(" BANG TONG KET - 5-FOLD CROSS VALIDATION")
+    print(" SUMMARY TABLE - 5-FOLD CROSS VALIDATION")
     print("=" * 80)
     header = (
         f"{'Model':<22}{'Acc mean':>10}{'Acc std':>9}"
@@ -511,15 +520,15 @@ if __name__ == "__main__":
             f"{gpu_str:>10}"
         )
 
-    # ---- Luu CSV chi tiet tung fold ----
+    # ---- Save per-fold detail CSV ----
     with open(RESULTS_CSV, "w", newline="", encoding="utf-8") as f:
         fieldnames = ["model", "fold", "test_acc", "test_f1", "best_val_f1"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(all_fold_rows)
-    print(f"\nDa luu chi tiet tung fold : {RESULTS_CSV}")
+    print(f"\nSaved per-fold detail : {RESULTS_CSV}")
 
-    # ---- Luu CSV tong ket ----
+    # ---- Save summary CSV ----
     summary_rows = [
         {k: v for k, v in r.items() if k != "fold_detail"}
         for r in final_results
@@ -528,5 +537,5 @@ if __name__ == "__main__":
         writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
         writer.writeheader()
         writer.writerows(summary_rows)
-    print(f"Da luu tong ket 5-fold    : {SUMMARY_CSV}")
-    print(f"Ket thuc                  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Saved 5-fold summary  : {SUMMARY_CSV}")
+    print(f"Finished              : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
