@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import datasets
@@ -52,11 +53,17 @@ LR_HEAD           = 1e-4   # larger LR for the freshly initialized classifier he
 WARMUP_EPOCHS     = 3      # first few epochs ramp LR from 0 -> target (stabilizes training, esp. ShuffleNet)
 PATIENCE          = 10
 WEIGHT_DECAY      = 5e-4
-LABEL_SMOOTHING   = 0.1
+USE_WEIGHTED_SAMPLER = True  # keep current class-balancing baseline unless class_weight is enabled
+USE_CLASS_WEIGHT      = False # use per-class loss weights instead of sampler
+USE_FOCAL_LOSS        = False # focal loss replaces plain CE for harder-example emphasis
+FOCAL_GAMMA           = 2.0
+USE_LABEL_SMOOTHING   = True  # toggle label smoothing for CE-based runs
+LABEL_SMOOTHING       = 0.1
 GRAD_CLIP_NORM    = 1.0    # guards against exploding gradients / early-training instability
-MIXUP_ALPHA       = 0.2    # 0 = disable mixup
-MIXUP_PROB        = 0.5    # probability of applying mixup to a given train batch
-ENABLE_COLOR_JITTER = True # toggle for ablation
+USE_MIXUP          = True   # toggle mixup for ablation
+MIXUP_ALPHA        = 0.2    # 0 = disable mixup even if USE_MIXUP is True
+MIXUP_PROB         = 0.5    # probability of applying mixup to a given train batch
+USE_COLOR_JITTER   = True   # toggle for ablation
 RANDOM_SEED       = 42
 
 RESULTS_CSV  = os.path.join(RESULTS_DIR, "kfold_results_detail.csv")    # per-fold results
@@ -108,7 +115,7 @@ def build_loaders(model_name, fold_dir):
     train_transforms = build_image_transform(
         model_name,
         train=True,
-        enable_color_jitter=ENABLE_COLOR_JITTER,
+        enable_color_jitter=USE_COLOR_JITTER,
     )
     eval_transforms = build_image_transform(model_name, train=False)
 
@@ -127,22 +134,50 @@ def build_loaders(model_name, fold_dir):
             f"{ds.classes} != {CLASS_NAMES}"
         )
 
-    # WeightedRandomSampler: oversample the minority classes (do NOT also use class_weights
-    # in the loss - that would be double-correction, see log.md Round 3)
+    # Class weights and WeightedRandomSampler are two alternative imbalance strategies.
+    # Keep only one active at a time to avoid double-correction during ablation.
     labels         = [lbl for _, lbl in train_dataset.samples]
     class_counts   = Counter(labels)
-    sample_weights = [1.0 / class_counts[lbl] for lbl in labels]
-    sampler = WeightedRandomSampler(
-        weights=sample_weights, num_samples=len(sample_weights), replacement=True
-    )
+    class_weights = build_class_weights(class_counts)
+
+    use_weighted_sampler = USE_WEIGHTED_SAMPLER and not (USE_CLASS_WEIGHT or USE_FOCAL_LOSS)
+    if USE_WEIGHTED_SAMPLER and not use_weighted_sampler:
+        print("  [Ablation] Weighted sampler disabled because class_weight/focal_loss is enabled.")
+
+    sampler = None
+    shuffle = True
+    if use_weighted_sampler:
+        sample_weights = [1.0 / class_counts[lbl] for lbl in labels]
+        sampler = WeightedRandomSampler(
+            weights=sample_weights, num_samples=len(sample_weights), replacement=True
+        )
+        shuffle = False
 
     # num_workers=4 on Windows requires the if __name__=="__main__" guard (present at file end)
     kw = dict(num_workers=4, pin_memory=True, persistent_workers=True)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, **kw)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        sampler=sampler,
+        shuffle=shuffle,
+        **kw,
+    )
     val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,   **kw)
     test_loader  = DataLoader(test_dataset,  batch_size=BATCH_SIZE, shuffle=False,   **kw)
 
-    return train_loader, val_loader, test_loader, train_dataset
+    return train_loader, val_loader, test_loader, train_dataset, class_weights
+
+
+def build_class_weights(class_counts):
+    """Return normalized per-class weights for loss reweighting."""
+    total = sum(class_counts.values())
+    weights = []
+    for class_idx in range(NUM_CLASSES):
+        count = class_counts.get(class_idx, 0)
+        if count == 0:
+            raise ValueError(f"Missing samples for class index {class_idx} ({CLASS_NAMES[class_idx]})")
+        weights.append(total / (NUM_CLASSES * count))
+    return torch.tensor(weights, dtype=torch.float32)
 
 
 def log_class_distribution(train_dataset):
@@ -159,6 +194,54 @@ def mixup_data(x, y, alpha):
     index = torch.randperm(x.size(0), device=x.device)
     mixed_x = lam * x + (1 - lam) * x[index]
     return mixed_x, y, y[index], lam
+
+
+class FocalLoss(nn.Module):
+    """Multi-class focal loss for class-imbalance ablation."""
+
+    def __init__(self, gamma=2.0, weight=None, reduction="mean"):
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        if weight is not None:
+            self.register_buffer("weight", weight)
+        else:
+            self.weight = None
+
+    def forward(self, logits, targets):
+        ce_loss = F.cross_entropy(
+            logits,
+            targets,
+            weight=self.weight,
+            reduction="none",
+        )
+        pt = torch.exp(-ce_loss)
+        loss = (1 - pt).pow(self.gamma) * ce_loss
+
+        if self.reduction == "sum":
+            return loss.sum()
+        if self.reduction == "none":
+            return loss
+        return loss.mean()
+
+
+def build_train_criterion(class_weights):
+    """Build the training loss from the current ablation flags."""
+    loss_weight = class_weights.to(DEVICE) if USE_CLASS_WEIGHT or USE_FOCAL_LOSS else None
+    use_label_smoothing = USE_LABEL_SMOOTHING and not USE_FOCAL_LOSS
+    if USE_FOCAL_LOSS and USE_LABEL_SMOOTHING:
+        print("  [Ablation] Label smoothing disabled because focal loss is enabled.")
+
+    if USE_FOCAL_LOSS:
+        criterion_train = FocalLoss(gamma=FOCAL_GAMMA, weight=loss_weight)
+    else:
+        criterion_train = nn.CrossEntropyLoss(
+            weight=loss_weight,
+            label_smoothing=LABEL_SMOOTHING if use_label_smoothing else 0.0,
+        )
+
+    criterion_eval = nn.CrossEntropyLoss()
+    return criterion_train.to(DEVICE), criterion_eval.to(DEVICE)
 
 def plot_learning_curve(history, model_name, fold_name):
     ensure_dirs(EVAL_OUTPUT_DIR)
@@ -209,7 +292,7 @@ def run_epoch(model, loader, criterion, optimizer=None, scaler=None, desc=""):
         for inputs, labels in tqdm(loader, desc=desc, leave=False):
             inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
 
-            use_mixup = MIXUP_ALPHA > 0 and torch.rand(1).item() < MIXUP_PROB
+            use_mixup = USE_MIXUP and MIXUP_ALPHA > 0 and torch.rand(1).item() < MIXUP_PROB
             if use_mixup:
                 inputs, labels_a, labels_b, lam = mixup_data(inputs, labels, MIXUP_ALPHA)
 
@@ -259,13 +342,12 @@ def run_epoch(model, loader, criterion, optimizer=None, scaler=None, desc=""):
 def train_one_fold(model_name, fold_name, fold_dir):
     print(f"\n  --- {MODEL_CONFIGS[model_name]['display_name']} | {fold_name} ---")
 
-    train_loader, val_loader, test_loader, train_ds = build_loaders(model_name, fold_dir)
+    train_loader, val_loader, test_loader, train_ds, class_weights = build_loaders(model_name, fold_dir)
     log_class_distribution(train_ds)
 
     model = get_model(model_name).to(DEVICE)
 
-    criterion_train = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-    criterion_eval  = nn.CrossEntropyLoss()
+    criterion_train, criterion_eval = build_train_criterion(class_weights)
 
     optimizer = optim.AdamW(
         get_param_groups(model, model_name, LR_BACKBONE, LR_HEAD),
