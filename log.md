@@ -190,3 +190,46 @@ Project trước đó có file/folder tên lẫn lộn nhiều kiểu (`01b_...p
 ### Lưu ý
 - Các thay đổi rename/xóa file tracked đã được `git mv`/`git rm` (staged), nhưng **chưa commit** — người dùng tự quyết định khi nào commit.
 - `checkpoints/`, `data/acne04_folds/` (5.3GB dataset đã split, giữ nguyên không đổi nội dung) không bị xóa.
+
+---
+
+## Round 5 — Preprocessing pipeline (2026-07-02)
+
+### Mục tiêu
+Cải thiện chất lượng ảnh đầu vào trước khi training: phát hiện và crop vùng mặt (thay vì resize toàn bộ ảnh gốc), tự động cân bằng contrast, và giữ tỷ lệ khung hình (không méo).
+
+### Thay đổi
+
+| Ưu tiên | File | Thay đổi | Vị trí |
+|---|---|---|---|
+| 🔴 Cao | `core/model_utils.py` | Thêm class `FaceROICrop` — dùng Haar cascade (`haarcascade_frontalface_default.xml`) để detect mặt, crop vùng mặt với padding 15%, fallback sang `_center_square_crop` (crop vuông từ tâm) nếu không detect được | class `FaceROICrop` |
+| 🟡 Trung bình | `core/model_utils.py` | Thêm `ImageOps.autocontrast` vào PIL transform pipeline — tự động kéo dãn histogram contrast cho mỗi ảnh | `build_pil_transform()` |
+| 🟡 Trung bình | `core/model_utils.py` | Đổi logic resize: thay vì `Resize((H, W))` trực tiếp (méo tỷ lệ), giờ crop vuông trước (qua `FaceROICrop`) rồi `Resize(img_size)` — giữ tỷ lệ 1:1 | `build_pil_transform()` |
+| 🟡 Trung bình | `core/model_utils.py` | Tách `build_pil_transform()` ra riêng khỏi `build_image_transform()` để `05_gradcam.py` có thể dùng PIL transform (trước `ToTensor`/`Normalize`) để lấy ảnh overlay | `build_pil_transform()` |
+
+---
+
+## Round 6 — Ordinal reformulation (threshold-based binary decomposition) (2026-07-02)
+
+### Mục tiêu
+Bài toán phân loại mức độ mụn là **ordinal** (Level_0 < Level_1 < Level_2 < Level_3). Chuyển output head và loss function từ softmax multi-class sang ordinal binary decomposition (K-1 threshold logits + BCE loss), giúp model học được quan hệ thứ tự giữa các lớp.
+
+> ⚠️ **CẢNH BÁO:** Checkpoint `.pth` cũ (trước Round 6) không còn tương thích với head mới (output K-1 = 3 logits thay vì K = 4) — cần train lại từ đầu.
+
+### Thay đổi
+
+| Ưu tiên | File | Thay đổi | Vị trí |
+|---|---|---|---|
+| 🔴 Cao | `core/model_utils.py` | Thêm `ORDINAL_OUTPUTS = NUM_CLASSES - 1`; thêm hàm `encode_ordinal_targets()` — mã hóa label k thành vector nhị phân [1]*k + [0]*(K-1-k) | module-level |
+| 🔴 Cao | `core/model_utils.py` | Thêm `ordinal_logits_to_class_indices()` — decode ordinal logits thành class index bằng threshold 0.5 trên sigmoid | module-level |
+| 🔴 Cao | `core/model_utils.py` | Thêm `ordinal_logits_to_class_probabilities()` — chuyển ordinal logits thành phân phối xác suất K lớp (có clamp + renormalize do thiếu ràng buộc đơn điệu) | module-level |
+| 🔴 Cao | `core/model_utils.py` | Sửa `get_model()`: thêm tham số `ordinal=False`; khi `ordinal=True`, output head là `nn.Linear(in_features, K-1)` thay vì `nn.Linear(in_features, K)` | `get_model()` |
+| 🔴 Cao | `scripts/03_train.py` | Thêm `OrdinalBCEWithLogitsLoss` (ordinal BCE với pos_weight + label smoothing tùy chọn) và `OrdinalFocalLoss` (focal loss variant cho ablation) | class definitions |
+| 🔴 Cao | `scripts/03_train.py` | Thêm cờ ablation `USE_ORDINAL`, sửa `run_epoch()` để encode target bằng `encode_ordinal_targets()` và decode prediction bằng `ordinal_logits_to_class_indices()` | `run_epoch()`, cấu hình §1 |
+| 🟡 Trung bình | `scripts/04_evaluate.py` | Sửa inference: dùng `ordinal_logits_to_class_probabilities()` cho ROC/AUC và `ordinal_logits_to_class_indices()` cho accuracy/F1 | `run_inference()` |
+| 🟡 Trung bình | `core/model_utils.py` | Thêm class `OrdinalClassTarget` — Grad-CAM target scoring cho ordinal probability của một class cụ thể | class `OrdinalClassTarget` |
+| 🟡 Trung bình | `scripts/05_gradcam.py` | Sửa Grad-CAM target: dùng `OrdinalClassTarget(pred_idx)` thay vì `ClassifierOutputTarget` | `apply_gradcam_plusplus()` |
+
+### Ghi chú kỹ thuật
+- Kiến trúc sử dụng `nn.Linear(in_features, K-1)` với trọng số **độc lập** cho mỗi threshold — đây là ordinal binary decomposition kiểu Frank & Hall / Niu et al., **KHÔNG phải** CORAL chuẩn (Cao, Mirjalili & Raschka, 2020) vốn yêu cầu shared weight vector giữa các threshold để đảm bảo rank monotonicity.
+- Do thiếu ràng buộc shared weight, sigmoid outputs không đảm bảo đơn điệu → `ordinal_logits_to_class_probabilities()` có bước `clamp(min=0)` + renormalize để xử lý trường hợp xác suất âm.

@@ -23,6 +23,7 @@ from sklearn.metrics import (
     roc_curve,
     auc,
     f1_score,
+    cohen_kappa_score,
 )
 from sklearn.preprocessing import label_binarize
 from tqdm import tqdm
@@ -248,10 +249,12 @@ def evaluate_model(model_name, fold_name, test_dir, output_dir):
     acc      = (y_pred == y_true).mean()
     macro_f1 = f1_score(y_true, y_pred, average="macro",    zero_division=0)
     wt_f1    = f1_score(y_true, y_pred, average="weighted", zero_division=0)
+    qwk      = cohen_kappa_score(y_true, y_pred, weights="quadratic")
 
     print(f"\n  Test Accuracy       : {acc*100:.2f}%")
     print(f"  Macro F1            : {macro_f1:.4f}")
     print(f"  Weighted F1         : {wt_f1:.4f}")
+    print(f"  Quadratic W. Kappa  : {qwk:.4f}")
     print("\n  Classification Report:")
     report = classification_report(
         y_true, y_pred, target_names=CLASS_NAMES, digits=4
@@ -281,6 +284,7 @@ def evaluate_model(model_name, fold_name, test_dir, output_dir):
         f.write(f"Test Accuracy : {acc*100:.2f}%\n")
         f.write(f"Macro F1      : {macro_f1:.4f}\n")
         f.write(f"Weighted F1   : {wt_f1:.4f}\n")
+        f.write(f"QWK           : {qwk:.4f}\n")
         f.write(f"AUC macro     : {macro_auc:.4f}\n")
         f.write(f"AUC weighted  : {weighted_auc:.4f}\n\n")
         f.write("Classification Report:\n")
@@ -298,6 +302,7 @@ def evaluate_model(model_name, fold_name, test_dir, output_dir):
         "test_acc"    : round(acc * 100, 2),
         "macro_f1"    : round(macro_f1, 4),
         "weighted_f1" : round(wt_f1, 4),
+        "qwk"         : round(qwk, 4),
         "auc_macro"   : round(macro_auc, 4),
         "auc_weighted": round(weighted_auc, 4),
     }

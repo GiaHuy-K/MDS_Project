@@ -10,6 +10,16 @@ NOTE - there are two "01_" scripts, each a different entry point for Step 1:
                                        70/15/15 dataset; it pools all images and
                                        regenerates 5 stratified folds.
 Run only ONE of them; both produce the same output layout.
+
+⚠️ DATA LEAKAGE WARNING:
+This script pools all images from train/val/test at the IMAGE level (not patient level)
+and re-splits them using StratifiedKFold.  If the original dataset contains near-duplicate
+images or multiple images from the same patient across different splits, pooling and
+re-splitting may place near-duplicate / same-patient images into both the train and test
+sets of a new fold — leading to data leakage and inflated evaluation metrics.
+
+Recommendation: prefer 01_split_dataset_kfold.py (which uses the official ACNE04 fold
+files) as the default unless you have a specific reason to pool and re-split.
 """
 
 import os
@@ -122,6 +132,12 @@ def main():
     print("=" * 60)
     print(" BUILD 5-FOLD CROSS-VALIDATION FROM EXISTING DATASET")
     print("=" * 60)
+    print()
+    print("⚠️  WARNING: This script pools images at the IMAGE level (not patient")
+    print("   level). If the original dataset contains near-duplicate or same-patient")
+    print("   images across splits, re-splitting may cause data leakage.")
+    print("   Consider using 01_split_dataset_kfold.py (official ACNE04 folds) instead.")
+    print()
     print(f"Source: {SOURCE_DIR}")
     print(f"Output: {OUTPUT_DIR}")
     print(f"Folds : {N_FOLDS}")

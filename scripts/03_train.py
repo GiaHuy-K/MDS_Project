@@ -62,7 +62,7 @@ FOCAL_GAMMA           = 2.0
 USE_LABEL_SMOOTHING   = True  # toggle label smoothing for the ordinal BCE loss path
 LABEL_SMOOTHING       = 0.1
 GRAD_CLIP_NORM    = 1.0    # guards against exploding gradients / early-training instability
-USE_ORDINAL       = True   # switch the pipeline to ordinal reformulation (CORAL-style)
+USE_ORDINAL       = True   # switch the pipeline to ordinal binary decomposition (threshold-based)
 USE_MIXUP          = True   # toggle mixup for ablation
 MIXUP_ALPHA        = 0.2    # 0 = disable mixup even if USE_MIXUP is True
 MIXUP_PROB         = 0.5    # probability of applying mixup to a given train batch

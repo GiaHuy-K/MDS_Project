@@ -36,7 +36,17 @@ ORDINAL_OUTPUTS = NUM_CLASSES - 1
 
 
 def encode_ordinal_targets(labels, num_classes=NUM_CLASSES):
-    """Encode class indices into CORAL-style ordinal targets."""
+    """Encode class indices into ordinal binary decomposition targets.
+
+    Each label k is converted to a binary vector of length (num_classes - 1)
+    where positions 0..k-1 are 1 and positions k..end are 0.
+
+    NOTE: This is threshold-based ordinal encoding (Frank & Hall / Niu et al.),
+    NOT strict CORAL (Cao, Mirjalili & Raschka, 2020), which requires a shared
+    weight vector across all thresholds (only biases differ) to guarantee rank
+    monotonicity by architecture.  Our model uses nn.Linear(in_features, K-1)
+    with independent per-threshold weights.
+    """
     if not torch.is_tensor(labels):
         labels = torch.as_tensor(labels, dtype=torch.long)
     labels = labels.long().view(-1)
@@ -59,6 +69,10 @@ def ordinal_logits_to_class_probabilities(logits):
         class_probs.append(threshold_probs[:, idx - 1] - threshold_probs[:, idx])
     class_probs.append(threshold_probs[:, -1])
     probs = torch.stack(class_probs, dim=1)
+    # clamp(min=0) + renormalize: because our model uses independent per-threshold
+    # weights (not shared as in true CORAL), the sigmoid outputs are NOT guaranteed
+    # to be monotonically decreasing.  This can produce negative "probabilities"
+    # when P(Y > k-1) < P(Y > k).  Clamping and renormalizing is a pragmatic fix.
     probs = torch.clamp(probs, min=0.0)
     probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(1e-8)
     return probs
@@ -103,11 +117,38 @@ ALL_MODELS = list(MODEL_CONFIGS.keys())
 
 
 class FaceROICrop:
+    # Class-level counters for face-detection statistics (not thread-safe,
+    # intended for diagnostic logging only — see print_stats()).
+    _detected_count = 0
+    _fallback_count = 0
+
     def __init__(self, padding=0.15):
         self.padding = padding
         self.cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
+
+    # ------------------------------------------------------------------
+    # Pickle support: cv2.CascadeClassifier is not picklable, which breaks
+    # DataLoader(num_workers>0) on Windows (spawn).  We exclude it from
+    # the pickle state and lazy-load it back the first time __call__ runs
+    # in a new process.
+    # ------------------------------------------------------------------
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("cascade", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # cascade will be lazy-loaded in __call__
+
+    def _ensure_cascade(self):
+        """Lazy-load the Haar cascade if it hasn't been loaded yet (e.g. after unpickling)."""
+        if not hasattr(self, "cascade"):
+            self.cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
 
     def _center_square_crop(self, img):
         width, height = img.size
@@ -133,7 +174,10 @@ class FaceROICrop:
         if img.mode != "RGB":
             img = img.convert("RGB")
 
+        self._ensure_cascade()
+
         if self.cascade.empty():
+            FaceROICrop._fallback_count += 1
             return self._center_square_crop(img)
 
         gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
@@ -145,10 +189,31 @@ class FaceROICrop:
         )
 
         if len(faces) == 0:
+            FaceROICrop._fallback_count += 1
             return self._center_square_crop(img)
 
+        FaceROICrop._detected_count += 1
         x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
         return img.crop(self._expand_box(img.size[0], img.size[1], x, y, w, h))
+
+    @classmethod
+    def print_stats(cls):
+        """Print face-detection vs. fallback statistics."""
+        total = cls._detected_count + cls._fallback_count
+        if total == 0:
+            print("[FaceROICrop] No images processed yet.")
+            return
+        det_pct = cls._detected_count / total * 100
+        fb_pct = cls._fallback_count / total * 100
+        print(f"[FaceROICrop] Total: {total} | "
+              f"Detected: {cls._detected_count} ({det_pct:.1f}%) | "
+              f"Fallback: {cls._fallback_count} ({fb_pct:.1f}%)")
+
+    @classmethod
+    def reset_stats(cls):
+        """Reset detection counters."""
+        cls._detected_count = 0
+        cls._fallback_count = 0
 
 
 def build_image_transform(

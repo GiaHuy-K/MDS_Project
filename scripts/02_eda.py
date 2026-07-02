@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 from core.paths_config import KFOLD_DATASET_DIR, EDA_OUTPUT_DIR, ensure_dirs
-from core.model_utils import CLASS_NAMES
+from core.model_utils import CLASS_NAMES, FaceROICrop, build_pil_transform
 
 SPLITS      = ["train", "val", "test"]
 
@@ -155,6 +155,28 @@ def main():
         plot_sample_images(data_dir, output_dir)
 
         print(f"Done for {fold}. See results in the '{output_dir}/' folder")
+
+    # --- Face-detection statistics ---
+    # Run all images through FaceROICrop to measure detection vs. fallback rate.
+    print("\n--- Face-detection statistics (FaceROICrop) ---")
+    FaceROICrop.reset_stats()
+    pil_tf = build_pil_transform("efficientnet_lite3")  # model choice only affects resize, not face detect
+    for fold in fold_dirs:
+        for split in SPLITS:
+            split_dir = KFOLD_DATASET_DIR / fold / split
+            if not split_dir.exists():
+                continue
+            for cls in CLASS_NAMES:
+                cls_dir = split_dir / cls
+                if not cls_dir.exists():
+                    continue
+                for img_file in cls_dir.iterdir():
+                    if img_file.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp"):
+                        try:
+                            pil_tf(Image.open(str(img_file)).convert("RGB"))
+                        except Exception:
+                            pass
+    FaceROICrop.print_stats()
 
 
 if __name__ == "__main__":
