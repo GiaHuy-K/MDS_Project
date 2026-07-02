@@ -33,10 +33,12 @@ from core.model_utils import (
     MODEL_CONFIGS,
     NUM_CLASSES,
     CLASS_NAMES,
+    encode_ordinal_targets,
     build_image_transform,
     get_model,
     get_param_groups,
     count_params,
+    ordinal_logits_to_class_indices,
     measure_inference_time,
 )
 from core.paths_config import (
@@ -48,8 +50,8 @@ from core.paths_config import (
 # ==========================================
 BATCH_SIZE        = 16
 EPOCHS            = 100
-LR_BACKBONE       = 1e-5   # small LR for the pretrained backbone - curbs overfitting when fine-tuning
-LR_HEAD           = 1e-4   # larger LR for the freshly initialized classifier head
+DEFAULT_LR_BACKBONE = 1e-5   # stage-5 default for the pretrained backbone after augmentation/loss are fixed
+DEFAULT_LR_HEAD     = 1e-4   # stage-5 default for the freshly initialized classifier head
 WARMUP_EPOCHS     = 3      # first few epochs ramp LR from 0 -> target (stabilizes training, esp. ShuffleNet)
 PATIENCE          = 10
 WEIGHT_DECAY      = 5e-4
@@ -57,14 +59,51 @@ USE_WEIGHTED_SAMPLER = True  # keep current class-balancing baseline unless clas
 USE_CLASS_WEIGHT      = False # use per-class loss weights instead of sampler
 USE_FOCAL_LOSS        = False # focal loss replaces plain CE for harder-example emphasis
 FOCAL_GAMMA           = 2.0
-USE_LABEL_SMOOTHING   = True  # toggle label smoothing for CE-based runs
+USE_LABEL_SMOOTHING   = True  # toggle label smoothing for the ordinal BCE loss path
 LABEL_SMOOTHING       = 0.1
 GRAD_CLIP_NORM    = 1.0    # guards against exploding gradients / early-training instability
+USE_ORDINAL       = True   # switch the pipeline to ordinal reformulation (CORAL-style)
 USE_MIXUP          = True   # toggle mixup for ablation
 MIXUP_ALPHA        = 0.2    # 0 = disable mixup even if USE_MIXUP is True
 MIXUP_PROB         = 0.5    # probability of applying mixup to a given train batch
 USE_COLOR_JITTER   = True   # toggle for ablation
 RANDOM_SEED       = 42
+
+MODEL_TRAINING_RECIPE = {
+    "efficientnet_lite3": {
+        "lr_backbone": 8e-6,
+        "lr_head": 8e-5,
+        "weight_decay": 5e-4,
+        "warmup_epochs": 3,
+        "grad_clip_norm": 1.0,
+        "mixup_alpha": 0.2,
+        "mixup_prob": 0.50,
+        "color_jitter": True,
+        "random_erasing_p": 0.25,
+    },
+    "mobilenet_small": {
+        "lr_backbone": 1e-5,
+        "lr_head": 1e-4,
+        "weight_decay": 5e-4,
+        "warmup_epochs": 3,
+        "grad_clip_norm": 1.0,
+        "mixup_alpha": 0.2,
+        "mixup_prob": 0.45,
+        "color_jitter": True,
+        "random_erasing_p": 0.25,
+    },
+    "shufflenet": {
+        "lr_backbone": 8e-6,
+        "lr_head": 8e-5,
+        "weight_decay": 7e-4,
+        "warmup_epochs": 5,
+        "grad_clip_norm": 0.8,
+        "mixup_alpha": 0.15,
+        "mixup_prob": 0.35,
+        "color_jitter": True,
+        "random_erasing_p": 0.30,
+    },
+}
 
 RESULTS_CSV  = os.path.join(RESULTS_DIR, "kfold_results_detail.csv")    # per-fold results
 SUMMARY_CSV  = os.path.join(RESULTS_DIR, "kfold_results_summary.csv")   # final averages
@@ -106,16 +145,32 @@ def discover_folds():
     return folds
 
 
+def get_training_recipe(model_name):
+    recipe = dict(MODEL_TRAINING_RECIPE.get(model_name, {}))
+    recipe.setdefault("lr_backbone", DEFAULT_LR_BACKBONE)
+    recipe.setdefault("lr_head", DEFAULT_LR_HEAD)
+    recipe.setdefault("weight_decay", WEIGHT_DECAY)
+    recipe.setdefault("warmup_epochs", WARMUP_EPOCHS)
+    recipe.setdefault("grad_clip_norm", GRAD_CLIP_NORM)
+    recipe.setdefault("mixup_alpha", MIXUP_ALPHA)
+    recipe.setdefault("mixup_prob", MIXUP_PROB)
+    recipe.setdefault("color_jitter", USE_COLOR_JITTER)
+    recipe.setdefault("random_erasing_p", 0.25)
+    return recipe
+
+
 
 
 # ==========================================
 # 4. DATALOADERS
 # ==========================================
 def build_loaders(model_name, fold_dir):
+    recipe = get_training_recipe(model_name)
     train_transforms = build_image_transform(
         model_name,
         train=True,
-        enable_color_jitter=USE_COLOR_JITTER,
+        enable_color_jitter=USE_COLOR_JITTER and recipe["color_jitter"],
+        random_erasing_p=recipe["random_erasing_p"],
     )
     eval_transforms = build_image_transform(model_name, train=False)
 
@@ -134,15 +189,24 @@ def build_loaders(model_name, fold_dir):
             f"{ds.classes} != {CLASS_NAMES}"
         )
 
-    # Class weights and WeightedRandomSampler are two alternative imbalance strategies.
+    # Ordinal threshold weights, weighted sampling, and focal loss are alternative imbalance strategies.
     # Keep only one active at a time to avoid double-correction during ablation.
     labels         = [lbl for _, lbl in train_dataset.samples]
     class_counts   = Counter(labels)
-    class_weights = build_class_weights(class_counts)
+    ordinal_pos_weight = build_ordinal_pos_weight(class_counts)
 
     use_weighted_sampler = USE_WEIGHTED_SAMPLER and not (USE_CLASS_WEIGHT or USE_FOCAL_LOSS)
+    use_class_weight = USE_CLASS_WEIGHT and not USE_FOCAL_LOSS
     if USE_WEIGHTED_SAMPLER and not use_weighted_sampler:
         print("  [Ablation] Weighted sampler disabled because class_weight/focal_loss is enabled.")
+    if USE_CLASS_WEIGHT and not use_class_weight:
+        print("  [Ablation] Class weights disabled because focal_loss is enabled.")
+
+    effective_label_smoothing = LABEL_SMOOTHING if USE_LABEL_SMOOTHING else 0.0
+    if use_weighted_sampler or use_class_weight or USE_FOCAL_LOSS:
+        if USE_LABEL_SMOOTHING and LABEL_SMOOTHING > 0:
+            print("  [Ablation] Label smoothing disabled because sampler/class_weight/focal_loss is enabled.")
+        effective_label_smoothing = 0.0
 
     sampler = None
     shuffle = True
@@ -165,19 +229,23 @@ def build_loaders(model_name, fold_dir):
     val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,   **kw)
     test_loader  = DataLoader(test_dataset,  batch_size=BATCH_SIZE, shuffle=False,   **kw)
 
-    return train_loader, val_loader, test_loader, train_dataset, class_weights
+    return train_loader, val_loader, test_loader, train_dataset, ordinal_pos_weight, effective_label_smoothing
 
 
-def build_class_weights(class_counts):
-    """Return normalized per-class weights for loss reweighting."""
+def build_ordinal_pos_weight(class_counts):
+    """Return per-threshold positive weights for ordinal loss reweighting."""
     total = sum(class_counts.values())
-    weights = []
-    for class_idx in range(NUM_CLASSES):
-        count = class_counts.get(class_idx, 0)
-        if count == 0:
-            raise ValueError(f"Missing samples for class index {class_idx} ({CLASS_NAMES[class_idx]})")
-        weights.append(total / (NUM_CLASSES * count))
-    return torch.tensor(weights, dtype=torch.float32)
+    pos_weights = []
+    cumulative_negatives = 0
+    for threshold_idx in range(NUM_CLASSES - 1):
+        cumulative_negatives += class_counts.get(threshold_idx, 0)
+        positives = total - cumulative_negatives
+        if positives == 0:
+            raise ValueError(
+                f"Missing positive samples for ordinal threshold {threshold_idx}"
+            )
+        pos_weights.append(cumulative_negatives / positives)
+    return torch.tensor(pos_weights, dtype=torch.float32)
 
 
 def log_class_distribution(train_dataset):
@@ -196,27 +264,61 @@ def mixup_data(x, y, alpha):
     return mixed_x, y, y[index], lam
 
 
-class FocalLoss(nn.Module):
-    """Multi-class focal loss for class-imbalance ablation."""
+class OrdinalBCEWithLogitsLoss(nn.Module):
+    """Ordinal BCE loss with optional positive-class reweighting and smoothing."""
 
-    def __init__(self, gamma=2.0, weight=None, reduction="mean"):
+    def __init__(self, pos_weight=None, label_smoothing=0.0, reduction="mean"):
         super().__init__()
-        self.gamma = gamma
+        self.label_smoothing = label_smoothing
         self.reduction = reduction
-        if weight is not None:
-            self.register_buffer("weight", weight)
+        if pos_weight is not None:
+            self.register_buffer("pos_weight", pos_weight)
         else:
-            self.weight = None
+            self.pos_weight = None
+
+    def _smooth_targets(self, targets):
+        if self.label_smoothing <= 0:
+            return targets
+        return targets * (1.0 - self.label_smoothing) + 0.5 * self.label_smoothing
 
     def forward(self, logits, targets):
-        ce_loss = F.cross_entropy(
+        targets = self._smooth_targets(targets.float())
+        return F.binary_cross_entropy_with_logits(
             logits,
             targets,
-            weight=self.weight,
+            pos_weight=self.pos_weight,
+            reduction=self.reduction,
+        )
+
+
+class OrdinalFocalLoss(nn.Module):
+    """Ordinal focal loss for class-imbalance ablation."""
+
+    def __init__(self, gamma=2.0, pos_weight=None, label_smoothing=0.0, reduction="mean"):
+        super().__init__()
+        self.gamma = gamma
+        self.label_smoothing = label_smoothing
+        self.reduction = reduction
+        if pos_weight is not None:
+            self.register_buffer("pos_weight", pos_weight)
+        else:
+            self.pos_weight = None
+
+    def _smooth_targets(self, targets):
+        if self.label_smoothing <= 0:
+            return targets
+        return targets * (1.0 - self.label_smoothing) + 0.5 * self.label_smoothing
+
+    def forward(self, logits, targets):
+        targets = self._smooth_targets(targets.float())
+        bce_loss = F.binary_cross_entropy_with_logits(
+            logits,
+            targets,
+            pos_weight=self.pos_weight,
             reduction="none",
         )
-        pt = torch.exp(-ce_loss)
-        loss = (1 - pt).pow(self.gamma) * ce_loss
+        pt = torch.exp(-bce_loss)
+        loss = (1 - pt).pow(self.gamma) * bce_loss
 
         if self.reduction == "sum":
             return loss.sum()
@@ -225,22 +327,23 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 
-def build_train_criterion(class_weights):
+def build_train_criterion(ordinal_pos_weight, effective_label_smoothing):
     """Build the training loss from the current ablation flags."""
-    loss_weight = class_weights.to(DEVICE) if USE_CLASS_WEIGHT or USE_FOCAL_LOSS else None
-    use_label_smoothing = USE_LABEL_SMOOTHING and not USE_FOCAL_LOSS
-    if USE_FOCAL_LOSS and USE_LABEL_SMOOTHING:
-        print("  [Ablation] Label smoothing disabled because focal loss is enabled.")
+    loss_weight = ordinal_pos_weight.to(DEVICE) if USE_CLASS_WEIGHT or USE_FOCAL_LOSS else None
 
     if USE_FOCAL_LOSS:
-        criterion_train = FocalLoss(gamma=FOCAL_GAMMA, weight=loss_weight)
+        criterion_train = OrdinalFocalLoss(
+            gamma=FOCAL_GAMMA,
+            pos_weight=loss_weight,
+            label_smoothing=effective_label_smoothing,
+        )
     else:
-        criterion_train = nn.CrossEntropyLoss(
-            weight=loss_weight,
-            label_smoothing=LABEL_SMOOTHING if use_label_smoothing else 0.0,
+        criterion_train = OrdinalBCEWithLogitsLoss(
+            pos_weight=loss_weight,
+            label_smoothing=effective_label_smoothing,
         )
 
-    criterion_eval = nn.CrossEntropyLoss()
+    criterion_eval = OrdinalBCEWithLogitsLoss()
     return criterion_train.to(DEVICE), criterion_eval.to(DEVICE)
 
 def plot_learning_curve(history, model_name, fold_name):
@@ -277,7 +380,17 @@ def plot_learning_curve(history, model_name, fold_name):
 # ==========================================
 # 5. TRAIN / EVAL LOOP FOR ONE EPOCH
 # ==========================================
-def run_epoch(model, loader, criterion, optimizer=None, scaler=None, desc=""):
+def run_epoch(
+    model,
+    loader,
+    criterion,
+    optimizer=None,
+    scaler=None,
+    desc="",
+    mixup_alpha=0.0,
+    mixup_prob=0.0,
+    grad_clip_norm=1.0,
+):
     """
     Return: (avg_loss, accuracy, macro_f1, all_preds, all_labels)
     optimizer=None -> eval mode
@@ -292,22 +405,26 @@ def run_epoch(model, loader, criterion, optimizer=None, scaler=None, desc=""):
         for inputs, labels in tqdm(loader, desc=desc, leave=False):
             inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
 
-            use_mixup = USE_MIXUP and MIXUP_ALPHA > 0 and torch.rand(1).item() < MIXUP_PROB
+            use_mixup = USE_MIXUP and mixup_alpha > 0 and torch.rand(1).item() < mixup_prob
             if use_mixup:
-                inputs, labels_a, labels_b, lam = mixup_data(inputs, labels, MIXUP_ALPHA)
+                inputs, labels_a, labels_b, lam = mixup_data(inputs, labels, mixup_alpha)
+                ordinal_targets_a = encode_ordinal_targets(labels_a)
+                ordinal_targets_b = encode_ordinal_targets(labels_b)
+            else:
+                ordinal_targets = encode_ordinal_targets(labels)
 
             optimizer.zero_grad()
             with torch.amp.autocast(device_type=DEVICE.type, enabled=amp_enabled):
                 outputs = model(inputs)
                 if use_mixup:
-                    loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
+                    loss = lam * criterion(outputs, ordinal_targets_a) + (1 - lam) * criterion(outputs, ordinal_targets_b)
                 else:
-                    loss = criterion(outputs, labels)
-            preds = outputs.argmax(dim=1)
+                    loss = criterion(outputs, ordinal_targets)
+            preds = ordinal_logits_to_class_indices(outputs)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             scaler.step(optimizer)
             scaler.update()
 
@@ -322,8 +439,8 @@ def run_epoch(model, loader, criterion, optimizer=None, scaler=None, desc=""):
                 inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
                 with torch.amp.autocast(device_type=DEVICE.type, enabled=amp_enabled):
                     outputs = model(inputs)
-                    loss    = criterion(outputs, labels)
-                preds   = outputs.argmax(dim=1)
+                    loss    = criterion(outputs, encode_ordinal_targets(labels))
+                preds   = ordinal_logits_to_class_indices(outputs)
 
                 total_loss    += loss.item() * inputs.size(0)
                 total_correct += (preds == labels).sum().item()
@@ -342,16 +459,17 @@ def run_epoch(model, loader, criterion, optimizer=None, scaler=None, desc=""):
 def train_one_fold(model_name, fold_name, fold_dir):
     print(f"\n  --- {MODEL_CONFIGS[model_name]['display_name']} | {fold_name} ---")
 
-    train_loader, val_loader, test_loader, train_ds, class_weights = build_loaders(model_name, fold_dir)
+    recipe = get_training_recipe(model_name)
+    train_loader, val_loader, test_loader, train_ds, ordinal_pos_weight, effective_label_smoothing = build_loaders(model_name, fold_dir)
     log_class_distribution(train_ds)
 
-    model = get_model(model_name).to(DEVICE)
+    model = get_model(model_name, ordinal=USE_ORDINAL).to(DEVICE)
 
-    criterion_train, criterion_eval = build_train_criterion(class_weights)
+    criterion_train, criterion_eval = build_train_criterion(ordinal_pos_weight, effective_label_smoothing)
 
     optimizer = optim.AdamW(
-        get_param_groups(model, model_name, LR_BACKBONE, LR_HEAD),
-        weight_decay=WEIGHT_DECAY,
+        get_param_groups(model, model_name, recipe["lr_backbone"], recipe["lr_head"]),
+        weight_decay=recipe["weight_decay"],
     )
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=3, min_lr=1e-7
@@ -366,24 +484,31 @@ def train_one_fold(model_name, fold_name, fold_dir):
 
     for epoch in range(1, EPOCHS + 1):
         # Linear LR warmup for the first WARMUP_EPOCHS epochs (both param groups)
-        if epoch <= WARMUP_EPOCHS:
-            warmup_factor = epoch / WARMUP_EPOCHS
-            optimizer.param_groups[0]["lr"] = LR_BACKBONE * warmup_factor
-            optimizer.param_groups[1]["lr"] = LR_HEAD * warmup_factor
+        if epoch <= recipe["warmup_epochs"]:
+            warmup_factor = epoch / recipe["warmup_epochs"]
+            optimizer.param_groups[0]["lr"] = recipe["lr_backbone"] * warmup_factor
+            optimizer.param_groups[1]["lr"] = recipe["lr_head"] * warmup_factor
 
         current_lr_bb   = optimizer.param_groups[0]["lr"]
         current_lr_head = optimizer.param_groups[1]["lr"]
 
         train_loss, train_acc, train_f1, _, _ = run_epoch(
-            model, train_loader, criterion_train, optimizer, scaler,
-            desc=f"  [{fold_name}] E{epoch:02d}/{EPOCHS} Train"
+            model,
+            train_loader,
+            criterion_train,
+            optimizer,
+            scaler,
+            desc=f"  [{fold_name}] E{epoch:02d}/{EPOCHS} Train",
+            mixup_alpha=recipe["mixup_alpha"],
+            mixup_prob=recipe["mixup_prob"],
+            grad_clip_norm=recipe["grad_clip_norm"],
         )
         val_loss, val_acc, val_f1, _, _ = run_epoch(
             model, val_loader, criterion_eval,
             desc=f"  [{fold_name}] E{epoch:02d}/{EPOCHS} Val"
         )
         # Only let the plateau scheduler act after warmup is finished
-        if epoch > WARMUP_EPOCHS:
+        if epoch > recipe["warmup_epochs"]:
             scheduler.step(val_f1)
 
         history['train_loss'].append(train_loss)
@@ -509,7 +634,7 @@ def train_pipeline(model_name, folds):
     ckpt_path = os.path.join(CHECKPOINT_DIR, f"best_{model_name}_fold_1.pth")
     total_params, _, size_mb, cpu_ms, gpu_ms = 0, 0, 0.0, 0.0, None
     if os.path.exists(ckpt_path):
-        tmp_model = get_model(model_name).to(DEVICE)
+        tmp_model = get_model(model_name, ordinal=USE_ORDINAL).to(DEVICE)
         tmp_model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
         total_params, _, size_mb = count_params(tmp_model)
         cpu_ms = measure_inference_time(tmp_model, model_name, torch.device("cpu"))

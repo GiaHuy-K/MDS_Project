@@ -32,6 +32,8 @@ from core.model_utils import (
     MODEL_CONFIGS,
     NUM_CLASSES,
     CLASS_NAMES,
+    ordinal_logits_to_class_indices,
+    ordinal_logits_to_class_probabilities,
     build_image_transform,
     get_model,
 )
@@ -76,8 +78,8 @@ def run_inference(model, loader):
     for inputs, labels in tqdm(loader, desc="  Inferencing", leave=False):
         inputs  = inputs.to(DEVICE)
         outputs = model(inputs)
-        probs   = torch.softmax(outputs, dim=1).cpu().numpy()
-        preds   = probs.argmax(axis=1)
+        probs   = ordinal_logits_to_class_probabilities(outputs).cpu().numpy()
+        preds   = ordinal_logits_to_class_indices(outputs).cpu().numpy()
 
         all_probs.append(probs)
         all_preds.extend(preds.tolist())
@@ -232,7 +234,7 @@ def evaluate_model(model_name, fold_name, test_dir, output_dir):
         return None
 
     # Load model
-    model = get_model(model_name, pretrained=False)
+    model = get_model(model_name, pretrained=False, ordinal=True)
     model.load_state_dict(
         torch.load(checkpoint_path, map_location=DEVICE, weights_only=True)
     )

@@ -15,13 +15,15 @@ import cv2
 from PIL import Image
 from pytorch_grad_cam import GradCAMPlusPlus
 from pytorch_grad_cam.utils.image import show_cam_on_image
-from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 
 from core.model_utils import (
     MODEL_CONFIGS,
     CLASS_NAMES,
     build_image_transform,
     build_pil_transform,
+    ordinal_logits_to_class_indices,
+    ordinal_logits_to_class_probabilities,
+    OrdinalClassTarget,
     get_model,
     get_target_layers,
 )
@@ -91,7 +93,7 @@ def apply_gradcam_plusplus(model_name, fold_name, img_path, output_dir):
         return None
 
     # Load model
-    model = get_model(model_name, pretrained=False)
+    model = get_model(model_name, pretrained=False, ordinal=True)
     model.load_state_dict(
         torch.load(checkpoint_path, map_location=DEVICE, weights_only=True)
     )
@@ -113,8 +115,8 @@ def apply_gradcam_plusplus(model_name, fold_name, img_path, output_dir):
     # Prediction (predicted class + confidence)
     with torch.no_grad():
         output     = model(tensor)
-        pred_idx   = output.argmax(dim=1).item()
-        probs      = torch.softmax(output, dim=1)[0]
+        pred_idx   = ordinal_logits_to_class_indices(output).item()
+        probs      = ordinal_logits_to_class_probabilities(output)[0]
         confidence = probs[pred_idx].item()
 
     # Print per-class probabilities for reference
@@ -126,7 +128,7 @@ def apply_gradcam_plusplus(model_name, fold_name, img_path, output_dir):
     print(f"    -> Prediction: {CLASS_NAMES[pred_idx]} ({confidence*100:.1f}%)")
 
     target_layers = get_target_layers(model, model_name)
-    targets       = [ClassifierOutputTarget(pred_idx)]
+    targets       = [OrdinalClassTarget(pred_idx)]
 
     with GradCAMPlusPlus(model=model, target_layers=target_layers) as cam:
         grayscale_cam = cam(input_tensor=tensor, targets=targets)[0]

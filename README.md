@@ -109,13 +109,15 @@ python scripts/03_train.py
 Train lần lượt 3 model qua 5 fold. Tham số chính có thể chỉnh trong `scripts/03_train.py`:
 
 ```python
-BATCH_SIZE    = 16
-EPOCHS        = 100
-LR_BACKBONE   = 1e-5   # LR nho cho backbone pretrained
-LR_HEAD       = 1e-4   # LR lon hon cho classifier head moi
-WARMUP_EPOCHS = 3
-PATIENCE      = 10
+BATCH_SIZE          = 16
+EPOCHS              = 100
+DEFAULT_LR_BACKBONE = 1e-5   # stage 5: retune sau khi augmentation/loss da on dinh
+DEFAULT_LR_HEAD     = 1e-4
+WARMUP_EPOCHS       = 3
+PATIENCE            = 10
 ```
+
+LR backbone/head hiện được khai báo theo từng model trong `MODEL_TRAINING_RECIPE` của `scripts/03_train.py`, nên khi sang giai đoạn 5 bạn chỉ cần retune đúng một chỗ này thay vì phải sửa lại các stage dữ liệu/loss trước đó.
 
 Kết quả: checkpoint `checkpoints/best_<model>_<fold>.pth`, CSV tổng hợp trong `results/`.
 

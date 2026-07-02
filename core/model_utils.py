@@ -32,6 +32,48 @@ except ImportError as e:
 
 NUM_CLASSES = 4
 CLASS_NAMES = ["Level_0", "Level_1", "Level_2", "Level_3"]
+ORDINAL_OUTPUTS = NUM_CLASSES - 1
+
+
+def encode_ordinal_targets(labels, num_classes=NUM_CLASSES):
+    """Encode class indices into CORAL-style ordinal targets."""
+    if not torch.is_tensor(labels):
+        labels = torch.as_tensor(labels, dtype=torch.long)
+    labels = labels.long().view(-1)
+    thresholds = torch.arange(num_classes - 1, device=labels.device).unsqueeze(0)
+    return (labels.unsqueeze(1) > thresholds).float()
+
+
+def ordinal_logits_to_class_indices(logits):
+    """Decode ordinal logits into class indices by thresholding at 0.5."""
+    probs = torch.sigmoid(logits)
+    return (probs > 0.5).sum(dim=1).long()
+
+
+def ordinal_logits_to_class_probabilities(logits):
+    """Convert ordinal logits into a class-probability tensor for evaluation."""
+    threshold_probs = torch.sigmoid(logits)
+    class_probs = []
+    class_probs.append(1.0 - threshold_probs[:, 0])
+    for idx in range(1, threshold_probs.size(1)):
+        class_probs.append(threshold_probs[:, idx - 1] - threshold_probs[:, idx])
+    class_probs.append(threshold_probs[:, -1])
+    probs = torch.stack(class_probs, dim=1)
+    probs = torch.clamp(probs, min=0.0)
+    probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(1e-8)
+    return probs
+
+
+class OrdinalClassTarget:
+    """Grad-CAM target that scores a specific ordinal class probability."""
+
+    def __init__(self, class_idx, num_classes=NUM_CLASSES):
+        self.class_idx = class_idx
+        self.num_classes = num_classes
+
+    def __call__(self, model_output):
+        probs = ordinal_logits_to_class_probabilities(model_output)
+        return probs[:, self.class_idx].sum()
 
 # ==========================================
 # PER-MODEL CONFIGURATION
@@ -109,7 +151,12 @@ class FaceROICrop:
         return img.crop(self._expand_box(img.size[0], img.size[1], x, y, w, h))
 
 
-def build_image_transform(model_name, train=False, enable_color_jitter=True):
+def build_image_transform(
+    model_name,
+    train=False,
+    enable_color_jitter=True,
+    random_erasing_p=0.25,
+):
     cfg = MODEL_CONFIGS[model_name]
     transform_list = list(build_pil_transform(model_name).transforms)
 
@@ -129,7 +176,9 @@ def build_image_transform(model_name, train=False, enable_color_jitter=True):
     ])
 
     if train:
-        transform_list.append(transforms.RandomErasing(p=0.25, scale=(0.02, 0.15)))
+        transform_list.append(
+            transforms.RandomErasing(p=random_erasing_p, scale=(0.02, 0.15))
+        )
 
     return transforms.Compose(transform_list)
 
@@ -147,22 +196,24 @@ def build_pil_transform(model_name):
     ])
 
 
-def get_model(model_name, num_classes=NUM_CLASSES, pretrained=True):
+def get_model(model_name, num_classes=NUM_CLASSES, pretrained=True, ordinal=False):
     """Return a model whose final classifier is replaced to match this task's class count."""
+    output_units = num_classes - 1 if ordinal else num_classes
+
     if model_name == "efficientnet_lite3":
         model = timm.create_model(
-            "tf_efficientnet_lite3", pretrained=pretrained, num_classes=num_classes
+            "tf_efficientnet_lite3", pretrained=pretrained, num_classes=output_units
         )
 
     elif model_name == "mobilenet_small":
         weights = models.MobileNet_V3_Small_Weights.DEFAULT if pretrained else None
         model = models.mobilenet_v3_small(weights=weights)
-        model.classifier[3] = nn.Linear(model.classifier[3].in_features, num_classes)
+        model.classifier[3] = nn.Linear(model.classifier[3].in_features, output_units)
 
     elif model_name == "shufflenet":
         weights = models.ShuffleNet_V2_X1_0_Weights.DEFAULT if pretrained else None
         model = models.shufflenet_v2_x1_0(weights=weights)
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
+        model.fc = nn.Linear(model.fc.in_features, output_units)
 
     else:
         raise ValueError(
