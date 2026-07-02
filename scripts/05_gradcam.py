@@ -12,13 +12,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 import numpy as np
 import cv2
-from torchvision import transforms
 from PIL import Image
 from pytorch_grad_cam import GradCAMPlusPlus
 from pytorch_grad_cam.utils.image import show_cam_on_image
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 
-from core.model_utils import MODEL_CONFIGS, CLASS_NAMES, get_model, get_target_layers
+from core.model_utils import (
+    MODEL_CONFIGS,
+    CLASS_NAMES,
+    build_image_transform,
+    build_pil_transform,
+    get_model,
+    get_target_layers,
+)
 from core.paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, GRADCAM_OUTPUT_DIR, ensure_dirs
 
 # ==========================================
@@ -67,15 +73,7 @@ def _auto_pick_samples(fold_name, n_per_level=N_PER_LEVEL):
 # ==========================================
 def build_eval_transform(model_name):
     cfg = MODEL_CONFIGS[model_name]
-    transform = transforms.Compose([
-        transforms.Resize(
-            (cfg["img_size"], cfg["img_size"]),
-            interpolation=transforms.InterpolationMode.BILINEAR,
-            antialias=True,
-        ),
-        transforms.ToTensor(),
-        transforms.Normalize(cfg["mean"], cfg["std"]),
-    ])
+    transform = build_image_transform(model_name, train=False)
     return transform, cfg["img_size"]
 
 
@@ -101,9 +99,10 @@ def apply_gradcam_plusplus(model_name, fold_name, img_path, output_dir):
 
     # Prepare the image
     eval_transform, img_size = build_eval_transform(model_name)
+    pil_transform = build_pil_transform(model_name)
 
     # img_np: float32 [0,1] RGB, used to overlay the heatmap
-    img_pil = Image.open(img_path).convert("RGB").resize((img_size, img_size))
+    img_pil = pil_transform(Image.open(img_path).convert("RGB"))
     img_np  = np.array(img_pil).astype(np.float32) / 255.0
 
     # tensor: normalized, used for the forward pass

@@ -17,6 +17,11 @@ effective (it matches how the pretrained weights were produced).
 import torch
 import torch.nn as nn
 from torchvision import models
+from torchvision import transforms
+
+import cv2
+import numpy as np
+from PIL import ImageOps
 
 try:
     import timm
@@ -53,6 +58,93 @@ MODEL_CONFIGS = {
 }
 
 ALL_MODELS = list(MODEL_CONFIGS.keys())
+
+
+class FaceROICrop:
+    def __init__(self, padding=0.15):
+        self.padding = padding
+        self.cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+
+    def _center_square_crop(self, img):
+        width, height = img.size
+        side = min(width, height)
+        left = (width - side) // 2
+        top = (height - side) // 2
+        return img.crop((left, top, left + side, top + side))
+
+    def _expand_box(self, width, height, x, y, w, h):
+        side = int(max(w, h) * (1 + self.padding))
+        side = max(1, min(side, width, height))
+        center_x = x + (w / 2.0)
+        center_y = y + (h / 2.0)
+        left = int(round(center_x - (side / 2.0)))
+        top = int(round(center_y - (side / 2.0)))
+        left = max(0, min(left, width - side))
+        top = max(0, min(top, height - side))
+        right = left + side
+        bottom = top + side
+        return left, top, right, bottom
+
+    def __call__(self, img):
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        if self.cascade.empty():
+            return self._center_square_crop(img)
+
+        gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+        faces = self.cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(40, 40),
+        )
+
+        if len(faces) == 0:
+            return self._center_square_crop(img)
+
+        x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
+        return img.crop(self._expand_box(img.size[0], img.size[1], x, y, w, h))
+
+
+def build_image_transform(model_name, train=False, enable_color_jitter=True):
+    cfg = MODEL_CONFIGS[model_name]
+    transform_list = list(build_pil_transform(model_name).transforms)
+
+    if train:
+        transform_list.extend([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+        ])
+        if enable_color_jitter:
+            transform_list.append(
+                transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1)
+            )
+
+    transform_list.extend([
+        transforms.ToTensor(),
+        transforms.Normalize(cfg["mean"], cfg["std"]),
+    ])
+
+    if train:
+        transform_list.append(transforms.RandomErasing(p=0.25, scale=(0.02, 0.15)))
+
+    return transforms.Compose(transform_list)
+
+
+def build_pil_transform(model_name):
+    cfg = MODEL_CONFIGS[model_name]
+    return transforms.Compose([
+        FaceROICrop(),
+        transforms.Resize(
+            cfg["img_size"],
+            interpolation=transforms.InterpolationMode.BILINEAR,
+            antialias=True,
+        ),
+        transforms.Lambda(lambda img: ImageOps.autocontrast(img)),
+    ])
 
 
 def get_model(model_name, num_classes=NUM_CLASSES, pretrained=True):

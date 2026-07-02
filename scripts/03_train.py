@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from torchvision import datasets, transforms
+from torchvision import datasets
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -32,6 +32,7 @@ from core.model_utils import (
     MODEL_CONFIGS,
     NUM_CLASSES,
     CLASS_NAMES,
+    build_image_transform,
     get_model,
     get_param_groups,
     count_params,
@@ -104,34 +105,12 @@ def discover_folds():
 # 4. DATALOADERS
 # ==========================================
 def build_loaders(model_name, fold_dir):
-    cfg      = MODEL_CONFIGS[model_name]
-    img_size = cfg["img_size"]
-    mean, std = cfg["mean"], cfg["std"]
-
-    train_transform_list = [
-        transforms.Resize((img_size, img_size),
-                          interpolation=transforms.InterpolationMode.BILINEAR,
-                          antialias=True),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-    ]
-    if ENABLE_COLOR_JITTER:
-        train_transform_list.append(
-            transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1)
-        )
-    train_transform_list += [
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
-        transforms.RandomErasing(p=0.25, scale=(0.02, 0.15)),
-    ]
-    train_transforms = transforms.Compose(train_transform_list)
-    eval_transforms = transforms.Compose([
-        transforms.Resize((img_size, img_size),
-                          interpolation=transforms.InterpolationMode.BILINEAR,
-                          antialias=True),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
-    ])
+    train_transforms = build_image_transform(
+        model_name,
+        train=True,
+        enable_color_jitter=ENABLE_COLOR_JITTER,
+    )
+    eval_transforms = build_image_transform(model_name, train=False)
 
     train_dataset = datasets.ImageFolder(
         root=os.path.join(fold_dir, "train"), transform=train_transforms)
