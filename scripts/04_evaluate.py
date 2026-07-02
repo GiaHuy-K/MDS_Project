@@ -16,7 +16,7 @@ import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from torchvision import datasets
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,
@@ -27,7 +27,14 @@ from sklearn.metrics import (
 from sklearn.preprocessing import label_binarize
 from tqdm import tqdm
 
-from core.model_utils import ALL_MODELS, MODEL_CONFIGS, NUM_CLASSES, CLASS_NAMES, get_model
+from core.model_utils import (
+    ALL_MODELS,
+    MODEL_CONFIGS,
+    NUM_CLASSES,
+    CLASS_NAMES,
+    build_image_transform,
+    get_model,
+)
 from core.paths_config import KFOLD_DATASET_DIR, CHECKPOINT_DIR, EVAL_OUTPUT_DIR, ensure_dirs
 
 # ==========================================
@@ -47,17 +54,8 @@ print(f"Started            : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 # 1. DATALOADER
 # ==========================================
 def build_test_loader(model_name, test_dir):
-    cfg = MODEL_CONFIGS[model_name]
-    img_size = cfg["img_size"]
-    eval_transforms = transforms.Compose([
-        transforms.Resize(
-            (img_size, img_size),
-            interpolation=transforms.InterpolationMode.BILINEAR,
-            antialias=True,
-        ),
-        transforms.ToTensor(),
-        transforms.Normalize(cfg["mean"], cfg["std"]),
-    ])
+    img_size = MODEL_CONFIGS[model_name]["img_size"]
+    eval_transforms = build_image_transform(model_name, train=False)
     test_dataset = datasets.ImageFolder(root=test_dir, transform=eval_transforms)
     test_loader  = DataLoader(
         test_dataset, batch_size=BATCH_SIZE,
@@ -309,12 +307,30 @@ def evaluate_model(model_name, fold_name, test_dir, output_dir):
 if __name__ == "__main__":
     global_results = []
 
-    for fold_name in FOLDS:
+    # Discover available fold directories under KFOLD_DATASET_DIR (e.g. fold_1..fold_5)
+    available_folds = []
+    try:
+        available_folds = sorted([
+            p.name for p in Path(KFOLD_DATASET_DIR).iterdir()
+            if p.is_dir() and p.name.startswith("fold_")
+        ])
+    except Exception:
+        available_folds = []
+
+    if not available_folds:
+        # Fall back to configured FOLDS constant
+        available_folds = FOLDS
+
+    for fold_name in available_folds:
         print(f"\n" + "#"*60)
         print(f" RUNNING EVALUATION FOR: {fold_name}")
         print("#"*60)
 
-        test_dir = os.path.join(KFOLD_DATASET_DIR, fold_name, "test")
+        test_dir = os.path.join(str(KFOLD_DATASET_DIR), fold_name, "test")
+        if not os.path.exists(test_dir):
+            print(f"  [SKIP] Test directory not found: {test_dir}")
+            continue
+
         output_dir = os.path.join(BASE_OUTPUT_DIR, fold_name)
         ensure_dirs(output_dir)
 
